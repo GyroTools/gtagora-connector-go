@@ -49,7 +49,22 @@ func Create(url string, apiKey string, verifyCertificate bool) (*Agora, error) {
 	return agora, nil
 }
 
-func GetApiKey(url string, username string, password string, verifyCertificate bool) (string, error) {
-	client := http.NewPasswordClient(url, username, password, verifyCertificate)
-	return client.GetApiKey()
+func CreateWithPassword(url string, username string, password string, verifyCertificate bool) (*Agora, error) {
+	url, err := utils.ValidateURL(url)
+	if err != nil {
+		return nil, errors.New("invalid url")
+	}
+	passwordClient := http.NewPasswordClient(url, username, password, verifyCertificate)
+	apiKey, err := passwordClient.GetApiKey()
+	if err != nil {
+		return nil, err
+	}
+
+	agora := NewAgora(url, apiKey, verifyCertificate)
+
+	err = agora.Client.CheckConnection()
+	if err != nil {
+		return nil, errors.New(fmt.Sprintf("cannot connect to Agora: %s", err.Error()))
+	}
+	return agora, nil
 }

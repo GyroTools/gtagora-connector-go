@@ -54,6 +54,43 @@ func TestConnect(t *testing.T) {
 	}
 }
 
+func TestConnectWithPassword(t *testing.T) {
+	username := os.Getenv("AGORA_USERNAME")
+	if len(username) == 0 {
+		t.Errorf("did not find an username in the environment variable AGORA_USERNAME")
+		return
+	}
+	password := os.Getenv("AGORA_PASSWORD")
+	if len(password) == 0 {
+		t.Errorf("did not find an username in the environment variable AGORA_PASSWORD")
+		return
+	}
+
+	url := "https://gauss4.ethz.ch"
+	_, err := agora.CreateWithPassword(url, username, password, false)
+	if err != nil {
+		t.Errorf("could not connect to Agora: %s", err.Error())
+	}
+
+	url = "https://gauss4.ethz.ch/api/v2/project/"
+	_, err = agora.CreateWithPassword(url, username, password, false)
+	if err != nil {
+		t.Errorf("could not connect to Agora: %s", err.Error())
+	}
+
+	url = "gauss4.ethz.ch"
+	_, err = agora.CreateWithPassword(url, username, password, false)
+	if err != nil {
+		t.Errorf("could not connect to Agora: %s", err.Error())
+	}
+
+	url = "gauss4.ethz.ch/api/v2/project/"
+	_, err = agora.CreateWithPassword(url, username, password, false)
+	if err != nil {
+		t.Errorf("could not connect to Agora: %s", err.Error())
+	}
+}
+
 func TestGetApiKey(t *testing.T) {
 	username := os.Getenv("AGORA_USERNAME")
 	if len(username) == 0 {
@@ -67,7 +104,8 @@ func TestGetApiKey(t *testing.T) {
 	}
 
 	url := "https://gauss4.ethz.ch"
-	apiKey, err := agora.GetApiKey(url, username, password, false)
+	passwordClient := http.NewPasswordClient(url, username, password, false)
+	apiKey, err := passwordClient.GetApiKey()
 	if err != nil {
 		t.Errorf("could not get the api key: %s", err.Error())
 	} else if len(apiKey) == 0 {
