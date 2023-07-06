@@ -3,9 +3,10 @@ package agora
 import (
 	"errors"
 	"fmt"
-	"gyrotools/gtagora-connector-go/agora/models"
-	"gyrotools/gtagora-connector-go/internals/http"
-	"gyrotools/gtagora-connector-go/internals/utils"
+
+	"github.com/GyroTools/gtagora-connector-go/agora/models"
+	"github.com/GyroTools/gtagora-connector-go/internals/http"
+	"github.com/GyroTools/gtagora-connector-go/internals/utils"
 )
 
 type Agora struct {

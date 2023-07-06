@@ -1,10 +1,11 @@
 package test
 
 import (
-	"gyrotools/gtagora-connector-go/agora"
-	"gyrotools/gtagora-connector-go/internals/http"
 	"os"
 	"testing"
+
+	"github.com/GyroTools/gtagora-connector-go/agora"
+	"github.com/GyroTools/gtagora-connector-go/internals/http"
 )
 
 func TestPing(t *testing.T) {
