@@ -3,12 +3,32 @@ package agora
 import (
 	"errors"
 	"fmt"
+	"gyrotools/gtagora-connector-go/agora/models"
 	"gyrotools/gtagora-connector-go/internals/http"
 	"gyrotools/gtagora-connector-go/internals/utils"
 )
 
 type Agora struct {
 	Client *http.Client
+}
+
+func (a *Agora) GetProjects() ([]models.Project, error) {
+	var projects []models.Project
+	err := a.Client.GetAndParse(models.ProjectURL, &projects)
+	if err != nil {
+		return nil, err
+	}
+	return projects, nil
+}
+
+func (a *Agora) GetProject(id int) (*models.Project, error) {
+	var project models.Project
+
+	err := a.Client.GetAndParse(fmt.Sprintf("%s%d/", models.ProjectURL, id), &project)
+	if err != nil {
+		return nil, err
+	}
+	return &project, nil
 }
 
 func NewAgora(url string, apiKey string, verifyCert bool) *Agora {

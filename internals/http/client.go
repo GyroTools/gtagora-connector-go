@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"time"
@@ -75,6 +76,26 @@ func (client *Client) GetApiKey() (string, error) {
 	target := new(ApiKeyResponse)
 	json.NewDecoder(resp.Body).Decode(target)
 	return target.ApiKey, nil
+}
+
+func (client *Client) GetAndParse(path string, target interface{}) error {
+	resp, err := client.get(path, -1)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	err = json.Unmarshal(body, &target)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (client Client) getUrl(path string) string {

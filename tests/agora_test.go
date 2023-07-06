@@ -74,3 +74,31 @@ func TestGetApiKey(t *testing.T) {
 		t.Errorf("api key is empty")
 	}
 }
+
+func TestGetProjects(t *testing.T) {
+	apiKey := os.Getenv("AGORA_API_KEY")
+	if len(apiKey) == 0 {
+		t.Errorf("did not find an api key in the environment variable AGORA_API_KEY")
+		return
+	}
+
+	url := "https://gauss4.ethz.ch"
+	agora, err := agora.Create(url, apiKey, false)
+	if err != nil {
+		t.Errorf("could not connect to Agora: %s", err.Error())
+	}
+
+	project, err := agora.GetProject(21)
+	if err != nil {
+		t.Errorf("cannot get the project: %s", err.Error())
+	} else if project == nil {
+		t.Errorf("project is empty")
+	}
+
+	projects, err := agora.GetProjects()
+	if err != nil {
+		t.Errorf("cannot get the projects: %s", err.Error())
+	} else if len(projects) == 0 {
+		t.Errorf("projects is empty")
+	}
+}
