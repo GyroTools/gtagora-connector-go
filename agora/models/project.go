@@ -1,6 +1,10 @@
 package models
 
-import "time"
+import (
+	"time"
+
+	"github.com/GyroTools/gtagora-connector-go/internals/http"
+)
 
 const ProjectURL = "api/v2/project/"
 
@@ -16,6 +20,8 @@ type Project struct {
 	AnonSettings *int         `json:"anon_settings"`
 	AnonProfile  *int         `json:"anon_profile_set"`
 	CreatedDate  time.Time    `json:"created_date"`
+
+	http.BaseModel
 }
 
 type Membership struct {

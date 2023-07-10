@@ -13,6 +13,15 @@ type Agora struct {
 	Client *http.Client
 }
 
+func Ping(url string) error {
+	client := http.NewClient(url, "", false)
+	return client.Ping()
+}
+
+func (a *Agora) GetApiKey() (string, error) {
+	return a.Client.GetApiKey()
+}
+
 func (a *Agora) GetProjects() ([]models.Project, error) {
 	var projects []models.Project
 	err := a.Client.GetAndParse(models.ProjectURL, &projects)
@@ -30,6 +39,36 @@ func (a *Agora) GetProject(id int) (*models.Project, error) {
 		return nil, err
 	}
 	return &project, nil
+}
+
+func (a *Agora) GetFolder(id int) (*models.Folder, error) {
+	var folder models.Folder
+
+	err := a.Client.GetAndParse(fmt.Sprintf("%s%d/", models.FolderURL, id), &folder)
+	if err != nil {
+		return nil, err
+	}
+	return &folder, nil
+}
+
+func (a *Agora) GetFolderItem(id int) (*models.FolderItem, error) {
+	var folderItem models.FolderItem
+
+	err := a.Client.GetAndParse(fmt.Sprintf("%s%d/", models.FolderItemURL, id), &folderItem)
+	if err != nil {
+		return nil, err
+	}
+	return &folderItem, nil
+}
+
+func (a *Agora) NewImportPackage() (*models.ImportPackage, error) {
+	var importPackage models.ImportPackage
+
+	err := a.Client.PostAndParse(fmt.Sprintf("%s", models.ImportPackageURL), nil, &importPackage)
+	if err != nil {
+		return nil, err
+	}
+	return &importPackage, nil
 }
 
 func NewAgora(url string, apiKey string, verifyCert bool) *Agora {
