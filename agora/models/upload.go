@@ -285,12 +285,13 @@ func uploadWorker(fileChan chan UploadFile, uploadBytesCh chan int64, request_ur
 	// Decreasing internal counter for wait-group as soon as goroutine finishes
 	defer wg.Done()
 
+	transferRate := int64(5 * 1024 * 1024)
 	for file := range fileChan {
-		uploadFile(uploadBytesCh, request_url, api_key, file, fake)
+		transferRate, _ = uploadFile(uploadBytesCh, request_url, api_key, file, fake, transferRate)
 	}
 }
 
-func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, file UploadFile, fake bool) error {
+func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, file UploadFile, fake bool, transferRate int64) (int64, error) {
 	buffer := make([]byte, UPLOAD_CHUCK_SIZE)
 	fileInfo, err := os.Stat(file.SourcePath)
 
@@ -299,7 +300,7 @@ func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, fi
 	}
 
 	if err != nil {
-		return err
+		return transferRate, err
 	}
 	filesize := fileInfo.Size()
 	nof_chunks := int(math.Ceil(float64(filesize) / float64(UPLOAD_CHUCK_SIZE)))
@@ -307,7 +308,7 @@ func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, fi
 	client := &http.Client{}
 	r, err := os.Open(file.SourcePath)
 	if err != nil {
-		return err
+		return transferRate, err
 	}
 	uuid, _ := uuid.NewV4()
 
@@ -336,38 +337,49 @@ func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, fi
 
 		cancel := make(chan struct{})
 		nrBytesSent := int64(0)
-		go func() {
-			ticker := time.NewTicker(time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					sendBytes := int64(n) / 20
-					if nrBytesSent+sendBytes >= int64(n) {
+		if n > 2*int(transferRate) {
+			go func() {
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						if nrBytesSent+transferRate >= int64(n) {
+							return
+						}
+						uploadBytesCh <- transferRate
+						nrBytesSent += transferRate
+					case <-cancel:
+						// Task cancellation requested
 						return
 					}
-					uploadBytesCh <- sendBytes
-					nrBytesSent += sendBytes
-				case <-cancel:
-					// Task cancellation requested
-					return
 				}
-			}
-		}()
+			}()
+		}
 
+		start := time.Now()
 		err = uploadChunk(client, request_url, api_key, values, filepath.Base(file.SourcePath), fake)
 		if err != nil {
 			chunk_failed = true
 			break
 		}
+		duration := time.Since(start)
 		close(cancel)
 		uploadBytesCh <- int64(n) - nrBytesSent
+		if n > 2*int(transferRate) {
+			curTransferRate := int64(n) / int64(duration.Seconds())
+			if i == 0 {
+				transferRate = curTransferRate
+			} else {
+				transferRate = (curTransferRate + transferRate) / 2
+			}
+		}
 	}
 	r.Close()
 	if chunk_failed {
-		return err
+		return transferRate, err
 	}
-	return nil
+	return transferRate, nil
 }
 
 func uploadChunk(client *http.Client, url string, api_key string, values map[string]io.Reader, filename string, fake bool) (err error) {
