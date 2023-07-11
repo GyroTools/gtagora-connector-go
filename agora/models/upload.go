@@ -333,13 +333,35 @@ func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, fi
 			"flowRelativePath":     strings.NewReader(file.TargetPath),
 			"flowTotalChunks":      strings.NewReader(fmt.Sprintf("%d", nof_chunks)),
 		}
-		uploadBytesCh <- int64(n) / 2
+
+		cancel := make(chan struct{})
+		nrBytesSent := int64(0)
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					sendBytes := int64(n) / 20
+					if nrBytesSent+sendBytes >= int64(n) {
+						return
+					}
+					uploadBytesCh <- sendBytes
+					nrBytesSent += sendBytes
+				case <-cancel:
+					// Task cancellation requested
+					return
+				}
+			}
+		}()
+
 		err = uploadChunk(client, request_url, api_key, values, filepath.Base(file.SourcePath), fake)
 		if err != nil {
 			chunk_failed = true
 			break
 		}
-		uploadBytesCh <- int64(n) / 2
+		close(cancel)
+		uploadBytesCh <- int64(n) - nrBytesSent
 	}
 	r.Close()
 	if chunk_failed {
