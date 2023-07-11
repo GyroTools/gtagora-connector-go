@@ -1,6 +1,7 @@
 package test
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -14,68 +15,54 @@ import (
 const server = "https://chap02.ethz.ch"
 
 func createTempDirectory() (string, error) {
+	nrFiles := 20
+
 	dir, err := ioutil.TempDir("", "example")
 	if err != nil {
 		return "", err
 	}
 
 	// Create files in the temporary directory
-	file1 := filepath.Join(dir, "file1.txt")
-	file2 := filepath.Join(dir, "file2.txt")
-
-	err = ioutil.WriteFile(file1, []byte("File 1 content"), 0644)
+	file1 := filepath.Join(dir, "file_large.txt")
+	file, err := os.Create(file1)
 	if err != nil {
-		return "", err
+		panic(err)
+	}
+	defer file.Close()
+	if err := file.Truncate(int64(500 * 1024 * 1024)); err != nil {
+		panic(err)
 	}
 
-	err = ioutil.WriteFile(file2, []byte("File 2 content"), 0644)
-	if err != nil {
-		return "", err
+	// err = ioutil.WriteFile(file1, []byte("File 1 content"), 0644)
+	// if err != nil {
+	// 	return "", err
+	// }
+
+	for i := 0; i < nrFiles; i++ {
+		file2 := filepath.Join(dir, fmt.Sprintf("file%02d.txt", i))
+		err = ioutil.WriteFile(file2, []byte("File content"), 0644)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	return dir, nil
 }
 
-func TestFolder(t *testing.T) {
-	apiKey := os.Getenv("AGORA_API_KEY")
-	if len(apiKey) == 0 {
-		t.Errorf("did not find an api key in the environment variable AGORA_API_KEY")
-		return
+func getFiles(dir string) ([]string, error) {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
 	}
 
-	url := server
-	agora, err := agora.Create(url, apiKey, false)
-	if err != nil {
-		t.Errorf("could not connect to Agora: %s", err.Error())
+	var outFiles []string
+	for _, file := range files {
+		if file.IsDir() {
+			continue // Skip directories
+		}
+		outFiles = append(outFiles, filepath.Join(dir, file.Name()))
 	}
-
-	project, err := agora.GetProject(3)
-	if err != nil {
-		t.Errorf("cannot get the project: %s", err.Error())
-	} else if project == nil {
-		t.Errorf("project is empty")
-	}
-
-	folder, err := agora.GetFolder(*project.RootFolder)
-	if err != nil {
-		t.Errorf("cannot get the folder: %s", err.Error())
-	} else if folder == nil {
-		t.Errorf("folder is empty")
-	}
-
-	items, err := folder.GetItems()
-	if err != nil {
-		t.Errorf("cannot get the items: %s", err.Error())
-	} else if len(items) == 0 {
-		t.Errorf("items is empty")
-	}
-
-	folders, err := folder.GetFolders()
-	if err != nil {
-		t.Errorf("cannot get the subfolders: %s", err.Error())
-	} else if len(folders) == 0 {
-		t.Errorf("subfolders is empty")
-	}
+	return outFiles, nil
 }
 
 func TestPing(t *testing.T) {
@@ -250,6 +237,55 @@ func TestGetProjects(t *testing.T) {
 	} else if len(projects) == 0 {
 		t.Errorf("projects is empty")
 	}
+
+	myagora, err := agora.GetMyAgora()
+	if err != nil {
+		t.Errorf("cannot get the project: %s", err.Error())
+	} else if myagora == nil {
+		t.Errorf("project is empty")
+	}
+}
+
+func TestFolder(t *testing.T) {
+	apiKey := os.Getenv("AGORA_API_KEY")
+	if len(apiKey) == 0 {
+		t.Errorf("did not find an api key in the environment variable AGORA_API_KEY")
+		return
+	}
+
+	url := server
+	agora, err := agora.Create(url, apiKey, false)
+	if err != nil {
+		t.Errorf("could not connect to Agora: %s", err.Error())
+	}
+
+	project, err := agora.GetProject(3)
+	if err != nil {
+		t.Errorf("cannot get the project: %s", err.Error())
+	} else if project == nil {
+		t.Errorf("project is empty")
+	}
+
+	folder, err := agora.GetFolder(project.RootFolder)
+	if err != nil {
+		t.Errorf("cannot get the folder: %s", err.Error())
+	} else if folder == nil {
+		t.Errorf("folder is empty")
+	}
+
+	items, err := folder.GetItems()
+	if err != nil {
+		t.Errorf("cannot get the items: %s", err.Error())
+	} else if len(items) == 0 {
+		t.Errorf("items is empty")
+	}
+
+	folders, err := folder.GetFolders()
+	if err != nil {
+		t.Errorf("cannot get the subfolders: %s", err.Error())
+	} else if len(folders) == 0 {
+		t.Errorf("subfolders is empty")
+	}
 }
 
 func TestFolderItem(t *testing.T) {
@@ -301,8 +337,19 @@ func TestImportPackage(t *testing.T) {
 		return
 	}
 
-	files := []string{filepath.Join(tempDir, "file1.txt"), filepath.Join(tempDir, "file2.txt")}
-	err = importPackage.Upload(files)
+	progressChan := make(chan int)
+	defer close(progressChan)
+	go func() {
+		// this function receives the progress from the agora interface and passes it on to the gtPacknGo progress struct
+		chunksUploaded := 0
+		for progress := range progressChan {
+			chunksUploaded += 1
+			fmt.Printf("Upload Progress: %d\n", progress)
+		}
+	}()
+
+	files, err := getFiles(tempDir)
+	err = importPackage.Upload(files, progressChan)
 	if err != nil {
 		t.Errorf("cannot upload files: %s", err.Error())
 		return

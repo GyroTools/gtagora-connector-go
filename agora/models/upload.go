@@ -47,34 +47,45 @@ type ImportPackage struct {
 	NofRetries       int    `json:"nof_retries"`
 	State            int    `json:"state"`
 	TargetId         int    `json:"target_id"`
-	TargetType       int    `json:"target_type"`
+	TargetType       string `json:"target_type"`
 	TimelineItems    []int  `json:"timeline_items"`
 	User             int    `json:"user"`
 
 	agoraHttp.BaseModel
+	chunksToUpload int `json:"-"`
+	chunksUploaded int `json:"-"`
+}
+
+type FlowFile struct {
+	ID                  int           `json:"id"`
+	Chunks              []interface{} `json:"chunks"`
+	Identifier          string        `json:"identifier"`
+	OriginalFilename    string        `json:"original_filename"`
+	TotalSize           int           `json:"total_size"`
+	TotalChunks         int           `json:"total_chunks"`
+	ContentHash         string        `json:"content_hash"`
+	OriginalSourcePaths interface{}   `json:"original_source_paths"`
+	TotalChunksUploaded int           `json:"total_chunks_uploaded"`
+	State               int           `json:"state"`
+	Created             string        `json:"created"`
+	Updated             string        `json:"updated"`
 }
 
 type UploadFile struct {
 	SourcePath string
 	TargetPath string
 	Delete     bool
+	Size       int64
 }
 
-type Progress struct {
-	Tasks    TasksProgress `json:"tasks"`
-	State    int           `json:"state"`
-	Progress int           `json:"progress"`
-}
-
-type TasksProgress struct {
-	Count    int   `json:"count"`
-	Finished int   `json:"finished"`
-	Error    int   `json:"error"`
-	Ids      []int `json:"ids"`
-}
-
-func (importPackage *ImportPackage) Upload(input_files []string) error {
-	filesToUpload, filesToZip := analysePaths(input_files)
+func (importPackage *ImportPackage) Upload(input_files []string, progressChan chan int) error {
+	filesToUpload, filesToZip, err := analysePaths(input_files)
+	if err != nil {
+		return err
+	}
+	importPackage.chunksUploaded = 0
+	totalSize := getTotalSize(filesToUpload, filesToZip)
+	uploadedSize := int64(0)
 
 	requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("/api/v1/import/%d/upload/", importPackage.Id))
 
@@ -82,18 +93,30 @@ func (importPackage *ImportPackage) Upload(input_files []string) error {
 	parallel_uploads := 3
 	fake := false
 
-	fileCh := make(chan UploadFile)
-	wg := new(sync.WaitGroup)
-
 	apiKey, err := importPackage.Client.GetApiKey()
 	if err != nil {
 		return err
 	}
 
 	// Adding routines to workgroup and running then
+	fileCh := make(chan UploadFile)
+	uploadBytesCh := make(chan int64)
+	wg := new(sync.WaitGroup)
+
+	go func() {
+		for bytes := range uploadBytesCh {
+			uploadedSize += bytes
+			progress := int(100 * uploadedSize / totalSize)
+			if progress >= 100 {
+				progress = 99
+			}
+			progressChan <- progress
+		}
+	}()
+
 	for i := 0; i < parallel_uploads; i++ {
 		wg.Add(1)
-		go uploadWorker(fileCh, requestUrl, apiKey, fake, wg)
+		go uploadWorker(fileCh, uploadBytesCh, requestUrl, apiKey, fake, wg)
 	}
 
 	temp_dir, err := ioutil.TempDir("", "agora_app")
@@ -162,24 +185,13 @@ func (importPackage *ImportPackage) Complete(targetFolderId int, jsonImportFile 
 	return nil
 }
 
-func (importPackage *ImportPackage) Progress(progressChan chan<- Progress, errorChan chan<- error) {
-	curProgress, err := importPackage.progressSync()
+func (importPackage *ImportPackage) update() error {
+	requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("%s%d/", ImportPackageURL, importPackage.Id))
+	err := importPackage.Client.GetAndParse(requestUrl, importPackage)
 	if err != nil {
-		errorChan <- err
-		return
+		return err
 	}
-	progressChan <- *curProgress
-}
-
-func (importPackage *ImportPackage) progressSync() (*Progress, error) {
-	var cur_progress Progress
-
-	requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("/api/v1/import/%d/progress", importPackage.Id))
-	err := importPackage.Client.GetAndParse(requestUrl, &cur_progress)
-	if err != nil {
-		return nil, err
-	}
-	return &cur_progress, nil
+	return nil
 }
 
 func (importPackage *ImportPackage) wait(timeout time.Duration, wg *sync.WaitGroup) error {
@@ -198,11 +210,11 @@ func (importPackage *ImportPackage) wait(timeout time.Duration, wg *sync.WaitGro
 		case <-time.After(timeoutDuration):
 			return errors.New("upload progress timeout")
 		case <-ticker.C:
-			progress, err := importPackage.progressSync()
+			err := importPackage.update()
 			if err != nil {
 				return err
 			}
-			if progress.State == STATE_FINISHED || progress.State == STATE_ERROR {
+			if importPackage.State == STATE_FINISHED || importPackage.State == STATE_ERROR || importPackage.IsComplete {
 				return nil
 			}
 		}
@@ -212,10 +224,14 @@ func (importPackage *ImportPackage) wait(timeout time.Duration, wg *sync.WaitGro
 	}
 }
 
-func analysePaths(paths []string) (filesToUpload []UploadFile, filesToZip []UploadFile) {
+func analysePaths(paths []string) ([]UploadFile, []UploadFile, error) {
+	var filesToUpload []UploadFile
+	var filesToZip []UploadFile
 	for _, file := range paths {
 		fileInfo, err := os.Stat(file)
-		if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, errors.New(fmt.Sprintf("the file \"%s\" does not exist", file))
+		} else if err != nil {
 			continue
 		}
 		if fileInfo.IsDir() {
@@ -229,9 +245,9 @@ func analysePaths(paths []string) (filesToUpload []UploadFile, filesToZip []Uplo
 					relativePath = strings.TrimPrefix(relativePath, "/")
 
 					if info.Size() < UPLOAD_CHUCK_SIZE {
-						filesToZip = append(filesToZip, UploadFile{SourcePath: strings.Replace(path, "\\", "/", -1), TargetPath: relativePath, Delete: false})
+						filesToZip = append(filesToZip, UploadFile{SourcePath: strings.Replace(path, "\\", "/", -1), TargetPath: relativePath, Delete: false, Size: info.Size()})
 					} else {
-						filesToUpload = append(filesToUpload, UploadFile{SourcePath: strings.Replace(path, "\\", "/", -1), TargetPath: relativePath, Delete: false})
+						filesToUpload = append(filesToUpload, UploadFile{SourcePath: strings.Replace(path, "\\", "/", -1), TargetPath: relativePath, Delete: false, Size: info.Size()})
 					}
 				}
 				return nil
@@ -241,22 +257,40 @@ func analysePaths(paths []string) (filesToUpload []UploadFile, filesToZip []Uplo
 			if err != nil {
 				absPath = file
 			}
-			filesToUpload = append(filesToUpload, UploadFile{SourcePath: absPath, TargetPath: filepath.Base(file), Delete: false})
+			if fileInfo.Size() < UPLOAD_CHUCK_SIZE {
+				filesToZip = append(filesToZip, UploadFile{SourcePath: absPath, TargetPath: filepath.Base(file), Delete: false, Size: fileInfo.Size()})
+			} else {
+				filesToUpload = append(filesToUpload, UploadFile{SourcePath: absPath, TargetPath: filepath.Base(file), Delete: false, Size: fileInfo.Size()})
+			}
 		}
 	}
-	return filesToUpload, filesToZip
+	return filesToUpload, filesToZip, nil
 }
 
-func uploadWorker(fileChan chan UploadFile, request_url string, api_key string, fake bool, wg *sync.WaitGroup) {
+func getTotalSize(filesToUpload []UploadFile, filesToZip []UploadFile) int64 {
+	siz := int64(0)
+	for _, file := range filesToZip {
+		siz += file.Size
+		siz += int64(len(file.TargetPath))
+		siz += 150 // header size (approximate)
+	}
+
+	for _, file := range filesToUpload {
+		siz += file.Size
+	}
+	return siz
+}
+
+func uploadWorker(fileChan chan UploadFile, uploadBytesCh chan int64, request_url string, api_key string, fake bool, wg *sync.WaitGroup) {
 	// Decreasing internal counter for wait-group as soon as goroutine finishes
 	defer wg.Done()
 
 	for file := range fileChan {
-		uploadFile(request_url, api_key, file, fake)
+		uploadFile(uploadBytesCh, request_url, api_key, file, fake)
 	}
 }
 
-func uploadFile(request_url string, api_key string, file UploadFile, fake bool) error {
+func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, file UploadFile, fake bool) error {
 	buffer := make([]byte, UPLOAD_CHUCK_SIZE)
 	fileInfo, err := os.Stat(file.SourcePath)
 
@@ -299,11 +333,13 @@ func uploadFile(request_url string, api_key string, file UploadFile, fake bool) 
 			"flowRelativePath":     strings.NewReader(file.TargetPath),
 			"flowTotalChunks":      strings.NewReader(fmt.Sprintf("%d", nof_chunks)),
 		}
+		uploadBytesCh <- int64(n) / 2
 		err = uploadChunk(client, request_url, api_key, values, filepath.Base(file.SourcePath), fake)
 		if err != nil {
 			chunk_failed = true
 			break
 		}
+		uploadBytesCh <- int64(n) / 2
 	}
 	r.Close()
 	if chunk_failed {
@@ -403,7 +439,13 @@ func zipAndUpload(fileCh chan UploadFile, request_url string, api_key string, fi
 			defer file.Close()
 
 			relative_path := file_to_zip.TargetPath
-			f, err := w.Create(relative_path)
+			header := &zip.FileHeader{
+				Name:   relative_path,
+				Method: zip.Store,
+			}
+			f, err := w.CreateHeader(header)
+
+			//f, err := w.Create(relative_path)
 			if err != nil {
 				return err
 			}

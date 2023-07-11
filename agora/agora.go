@@ -22,6 +22,15 @@ func (a *Agora) GetApiKey() (string, error) {
 	return a.Client.GetApiKey()
 }
 
+func (a *Agora) GetMyAgora() (*models.Project, error) {
+	var project models.Project
+	err := a.Client.GetAndParse(fmt.Sprintf("%s%s/", models.ProjectURL, "myagora"), &project)
+	if err != nil {
+		return nil, err
+	}
+	return &project, nil
+}
+
 func (a *Agora) GetProjects() ([]models.Project, error) {
 	var projects []models.Project
 	err := a.Client.GetAndParse(models.ProjectURL, &projects)

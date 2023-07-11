@@ -13,7 +13,7 @@ type Project struct {
 	Name         string       `json:"name"`
 	Description  *string      `json:"description"`
 	Memberships  []Membership `json:"memberships"`
-	RootFolder   *int         `json:"root_folder"`
+	RootFolder   int          `json:"root_folder"`
 	Owner        *int         `json:"owner"`
 	IsMyAgora    bool         `json:"is_myagora"`
 	SpecialFunc  *string      `json:"special_function"`
