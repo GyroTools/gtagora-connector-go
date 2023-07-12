@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -22,14 +21,15 @@ import (
 )
 
 const (
-	UPLOAD_CHUCK_SIZE = 100 * 1024 * 1024
-	MAX_ZIP_SIZE      = 1024 * 1024 * 1024
-	STATE_UPLOADING   = 1
-	STATE_CHECKING    = 2
-	STATE_ANALYZING   = 3
-	STATE_IMPORTING   = 4
-	STATE_FINISHED    = 5
-	STATE_ERROR       = -1
+	UPLOAD_CHUCK_SIZE       = 100 * 1024 * 1024
+	MAX_ZIP_SIZE            = 1024 * 1024 * 1024
+	FAKE_PROGRESS_THRESHOLD = 5 * 1024 * 1024
+	STATE_UPLOADING         = 1
+	STATE_CHECKING          = 2
+	STATE_ANALYZING         = 3
+	STATE_IMPORTING         = 4
+	STATE_FINISHED          = 5
+	STATE_ERROR             = -1
 
 	ImportPackageURL = "/api/v1/import/"
 )
@@ -52,8 +52,6 @@ type ImportPackage struct {
 	User             int    `json:"user"`
 
 	agoraHttp.BaseModel
-	chunksToUpload int `json:"-"`
-	chunksUploaded int `json:"-"`
 }
 
 type FlowFile struct {
@@ -72,18 +70,18 @@ type FlowFile struct {
 }
 
 type UploadFile struct {
-	SourcePath string
-	TargetPath string
-	Delete     bool
-	Size       int64
+	SourcePath  string
+	TargetPath  string
+	Attachments []string
+	Delete      bool
+	Size        int64
 }
 
-func (importPackage *ImportPackage) Upload(input_files []string, progressChan chan int) error {
-	filesToUpload, filesToZip, err := analysePaths(input_files)
+func (importPackage *ImportPackage) Upload(inputFiles []string, mergeGroups [][]string, progressChan chan int) error {
+	filesToUpload, filesToZip, err := analysePaths(inputFiles, mergeGroups)
 	if err != nil {
 		return err
 	}
-	importPackage.chunksUploaded = 0
 	totalSize := getTotalSize(filesToUpload, filesToZip)
 	uploadedSize := int64(0)
 
@@ -119,8 +117,8 @@ func (importPackage *ImportPackage) Upload(input_files []string, progressChan ch
 		go uploadWorker(fileCh, uploadBytesCh, requestUrl, apiKey, fake, wg)
 	}
 
-	temp_dir, err := ioutil.TempDir("", "agora_app")
-	defer os.RemoveAll(temp_dir)
+	tempDir, err := os.MkdirTemp("", "agora_interface_go")
+	defer os.RemoveAll(tempDir)
 	if err != nil {
 		return err
 	}
@@ -129,7 +127,7 @@ func (importPackage *ImportPackage) Upload(input_files []string, progressChan ch
 	wg_upload_zip.Add(2)
 
 	go uploadFiles(fileCh, requestUrl, apiKey, filesToUpload, wg_upload_zip)
-	go zipAndUpload(fileCh, requestUrl, apiKey, filesToZip, temp_dir, wg_upload_zip)
+	go zipAndUpload(fileCh, requestUrl, apiKey, filesToZip, tempDir, wg_upload_zip)
 	wg_upload_zip.Wait()
 
 	// Closing channel (waiting in goroutines won't continue any more)
@@ -173,7 +171,7 @@ func (importPackage *ImportPackage) Complete(targetFolderId int, jsonImportFile 
 		if wg != nil {
 			defer wg.Done()
 		}
-		return errors.New(fmt.Sprintf("the \"complete\" request was invalid. http status = %d", resp.StatusCode))
+		return fmt.Errorf("the \"complete\" request was invalid. http status = %d", resp.StatusCode)
 	}
 
 	if wg != nil {
@@ -224,13 +222,13 @@ func (importPackage *ImportPackage) wait(timeout time.Duration, wg *sync.WaitGro
 	}
 }
 
-func analysePaths(paths []string) ([]UploadFile, []UploadFile, error) {
+func analysePaths(paths []string, mergeGroups [][]string) ([]UploadFile, []UploadFile, error) {
 	var filesToUpload []UploadFile
 	var filesToZip []UploadFile
 	for _, file := range paths {
 		fileInfo, err := os.Stat(file)
 		if os.IsNotExist(err) {
-			return nil, nil, errors.New(fmt.Sprintf("the file \"%s\" does not exist", file))
+			return nil, nil, fmt.Errorf("the file \"%s\" does not exist", file)
 		} else if err != nil {
 			continue
 		}
@@ -264,6 +262,35 @@ func analysePaths(paths []string) ([]UploadFile, []UploadFile, error) {
 			}
 		}
 	}
+	for _, group := range mergeGroups {
+		siz := int64(0)
+		var attachments []string
+		var absPath string
+		var targetPath string
+		for i, file := range group {
+			fileInfo, err := os.Stat(file)
+			if err != nil {
+				break
+			}
+			siz += fileInfo.Size()
+			if i == 0 {
+				absPath, err = filepath.Abs(file)
+				targetPath = filepath.Base(file)
+				if err != nil {
+					absPath = file
+				}
+			} else {
+				attAbsPath, err := filepath.Abs(file)
+				if err != nil {
+					attAbsPath = file
+				}
+				attachments = append(attachments, attAbsPath)
+			}
+
+		}
+		filesToUpload = append(filesToUpload, UploadFile{SourcePath: absPath, TargetPath: targetPath, Delete: false, Size: siz, Attachments: attachments})
+	}
+
 	return filesToUpload, filesToZip, nil
 }
 
@@ -293,91 +320,98 @@ func uploadWorker(fileChan chan UploadFile, uploadBytesCh chan int64, request_ur
 
 func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, file UploadFile, fake bool, transferRate int64) (int64, error) {
 	buffer := make([]byte, UPLOAD_CHUCK_SIZE)
-	fileInfo, err := os.Stat(file.SourcePath)
-
 	if file.Delete {
 		defer os.Remove(file.SourcePath)
 	}
-
-	if err != nil {
-		return transferRate, err
-	}
-	filesize := fileInfo.Size()
-	nof_chunks := int(math.Ceil(float64(filesize) / float64(UPLOAD_CHUCK_SIZE)))
-
-	client := &http.Client{}
-	r, err := os.Open(file.SourcePath)
-	if err != nil {
-		return transferRate, err
+	files := append([]string{file.SourcePath}, file.Attachments...)
+	totalSize := int64(0)
+	totalChunks := 0
+	var nrChunks []int
+	for _, curFile := range files {
+		fileInfo, err := os.Stat(curFile)
+		if err != nil {
+			return transferRate, err
+		}
+		totalSize += fileInfo.Size()
+		curNrChunks := int(math.Ceil(float64(fileInfo.Size()) / float64(UPLOAD_CHUCK_SIZE)))
+		nrChunks = append(nrChunks, curNrChunks)
+		totalChunks += curNrChunks
 	}
 	uuid, _ := uuid.NewV4()
 
-	chunk_failed := false
-	for i := 0; i < nof_chunks; i++ {
-		n, err := r.Read(buffer)
+	curChunkNr := 0
+	for j, curFile := range files {
+		client := &http.Client{}
+		r, err := os.Open(curFile)
 		if err != nil {
-			chunk_failed = true
-			break
+			return transferRate, err
 		}
-		chunk := bytes.NewReader(buffer[0:n])
+		defer r.Close()
+		for i := 0; i < nrChunks[j]; i++ {
+			n, err := r.Read(buffer)
+			if err != nil {
+				return transferRate, err
+			}
+			chunk := bytes.NewReader(buffer[0:n])
 
-		//prepare the reader instances to encode
-		values := map[string]io.Reader{
-			"file":                 chunk, // lets assume its this file
-			"description":          strings.NewReader(""),
-			"flowChunkNumber":      strings.NewReader(fmt.Sprintf("%d", i)),
-			"flowChunkSize":        strings.NewReader(fmt.Sprintf("%d", UPLOAD_CHUCK_SIZE)),
-			"flowCurrentChunkSize": strings.NewReader(fmt.Sprintf("%d", n)),
-			"flowTotalSize":        strings.NewReader(fmt.Sprintf("%d", filesize)),
-			"flowIdentifier":       strings.NewReader(uuid.String()),
-			"flowFilename":         strings.NewReader(file.TargetPath),
-			"flowRelativePath":     strings.NewReader(file.TargetPath),
-			"flowTotalChunks":      strings.NewReader(fmt.Sprintf("%d", nof_chunks)),
-		}
+			//prepare the reader instances to encode
+			values := map[string]io.Reader{
+				"file":                 chunk, // lets assume its this file
+				"description":          strings.NewReader(""),
+				"flowChunkNumber":      strings.NewReader(fmt.Sprintf("%d", curChunkNr)),
+				"flowChunkSize":        strings.NewReader(fmt.Sprintf("%d", UPLOAD_CHUCK_SIZE)),
+				"flowCurrentChunkSize": strings.NewReader(fmt.Sprintf("%d", n)),
+				"flowTotalSize":        strings.NewReader(fmt.Sprintf("%d", totalSize)),
+				"flowIdentifier":       strings.NewReader(uuid.String()),
+				"flowFilename":         strings.NewReader(file.TargetPath),
+				"flowRelativePath":     strings.NewReader(file.TargetPath),
+				"flowTotalChunks":      strings.NewReader(fmt.Sprintf("%d", totalChunks)),
+			}
+			curChunkNr += 1
 
-		cancel := make(chan struct{})
-		nrBytesSent := int64(0)
-		if n > 2*int(transferRate) {
-			go func() {
-				ticker := time.NewTicker(time.Second)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ticker.C:
-						if nrBytesSent+transferRate >= int64(n) {
+			// this goroutine sends continious (fake) progress updates since we cannot track the real number of sent bytes
+			cancel := make(chan struct{})
+			nrBytesSent := int64(0)
+			if n > FAKE_PROGRESS_THRESHOLD {
+				go func() {
+					ticker := time.NewTicker(time.Second)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ticker.C:
+							if nrBytesSent+transferRate >= int64(n) {
+								return
+							}
+							uploadBytesCh <- transferRate
+							nrBytesSent += transferRate
+						case <-cancel:
+							// Task cancellation requested
 							return
 						}
-						uploadBytesCh <- transferRate
-						nrBytesSent += transferRate
-					case <-cancel:
-						// Task cancellation requested
-						return
 					}
-				}
-			}()
-		}
+				}()
+			}
 
-		start := time.Now()
-		err = uploadChunk(client, request_url, api_key, values, filepath.Base(file.SourcePath), fake)
-		if err != nil {
-			chunk_failed = true
-			break
-		}
-		duration := time.Since(start)
-		close(cancel)
-		uploadBytesCh <- int64(n) - nrBytesSent
-		if n > 2*int(transferRate) {
-			curTransferRate := int64(n) / int64(duration.Seconds())
-			if i == 0 {
-				transferRate = curTransferRate
-			} else {
-				transferRate = (curTransferRate + transferRate) / 2
+			start := time.Now()
+			err = uploadChunk(client, request_url, api_key, values, filepath.Base(file.SourcePath), fake)
+			close(cancel)
+			if err != nil {
+				return transferRate, err
+			}
+			duration := time.Since(start)
+			uploadBytesCh <- int64(n) - nrBytesSent
+
+			// calculate the transfer rate
+			dur := int64(duration.Milliseconds())
+			if n > FAKE_PROGRESS_THRESHOLD && dur > 0 {
+				curTransferRate := 1000 * int64(n) / dur
+				if i == 0 {
+					transferRate = curTransferRate
+				} else {
+					transferRate = (curTransferRate + transferRate) / 2
+				}
 			}
 		}
-	}
-	r.Close()
-	if chunk_failed {
-		return transferRate, err
 	}
 	return transferRate, nil
 }

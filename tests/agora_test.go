@@ -2,7 +2,6 @@ package test
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,7 +16,7 @@ const server = "https://chap02.ethz.ch"
 func createTempDirectory() (string, error) {
 	nrFiles := 20
 
-	dir, err := ioutil.TempDir("", "example")
+	dir, err := os.MkdirTemp("", "agora_test")
 	if err != nil {
 		return "", err
 	}
@@ -29,18 +28,13 @@ func createTempDirectory() (string, error) {
 		panic(err)
 	}
 	defer file.Close()
-	if err := file.Truncate(int64(500 * 1024 * 1024)); err != nil {
+	if err := file.Truncate(int64(210 * 1024 * 1024)); err != nil {
 		panic(err)
 	}
 
-	// err = ioutil.WriteFile(file1, []byte("File 1 content"), 0644)
-	// if err != nil {
-	// 	return "", err
-	// }
-
 	for i := 0; i < nrFiles; i++ {
 		file2 := filepath.Join(dir, fmt.Sprintf("file%02d.txt", i))
-		err = ioutil.WriteFile(file2, []byte("File content"), 0644)
+		err = os.WriteFile(file2, []byte(fmt.Sprintf("File content %02d\n", i)), 0644)
 		if err != nil {
 			return "", err
 		}
@@ -190,7 +184,7 @@ func TestGetApiKey(t *testing.T) {
 		t.Errorf("api keys are different")
 	}
 
-	agorak, err := agora.Create(url, apiKey, false)
+	agorak, _ := agora.Create(url, apiKey, false)
 	apiKey3, err := agorak.GetApiKey()
 	if err != nil {
 		t.Errorf("could not get the api key: %s", err.Error())
@@ -200,7 +194,7 @@ func TestGetApiKey(t *testing.T) {
 		t.Errorf("api keys are different")
 	}
 
-	agorap, err := agora.CreateWithPassword(url, username, password, false)
+	agorap, _ := agora.CreateWithPassword(url, username, password, false)
 	apiKey4, err := agorap.GetApiKey()
 	if err != nil {
 		t.Errorf("could not get the api key: %s", err.Error())
@@ -309,7 +303,7 @@ func TestFolderItem(t *testing.T) {
 	}
 }
 
-func TestImportPackage(t *testing.T) {
+func TestUpload(t *testing.T) {
 	tempDir, err := createTempDirectory()
 	if err != nil {
 		panic(err)
@@ -348,8 +342,16 @@ func TestImportPackage(t *testing.T) {
 		}
 	}()
 
-	files, err := getFiles(tempDir)
-	err = importPackage.Upload(files, progressChan)
+	var files []string
+	for i := 0; i < 15; i++ {
+		files = append(files, filepath.Join(tempDir, fmt.Sprintf("file%02d.txt", i)))
+	}
+	files = append(files, filepath.Join(tempDir, "file_large.txt"))
+	mergeGroups := [][]string{
+		{filepath.Join(tempDir, "file15.txt"), filepath.Join(tempDir, "file16.txt")},
+		{filepath.Join(tempDir, "file17.txt"), filepath.Join(tempDir, "file18.txt"), filepath.Join(tempDir, "file19.txt")},
+	}
+	err = importPackage.Upload(files, mergeGroups, progressChan)
 	if err != nil {
 		t.Errorf("cannot upload files: %s", err.Error())
 		return
