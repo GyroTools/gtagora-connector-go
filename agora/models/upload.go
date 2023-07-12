@@ -17,7 +17,7 @@ import (
 	"time"
 
 	agoraHttp "github.com/GyroTools/gtagora-connector-go/internals/http"
-	uuid "github.com/nu7hatch/gouuid"
+	"github.com/google/uuid"
 )
 
 const (
@@ -337,7 +337,7 @@ func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, fi
 		nrChunks = append(nrChunks, curNrChunks)
 		totalChunks += curNrChunks
 	}
-	uuid, _ := uuid.NewV4()
+	uuid := uuid.New()
 
 	curChunkNr := 0
 	for j, curFile := range files {
