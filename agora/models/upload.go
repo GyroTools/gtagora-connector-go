@@ -74,11 +74,70 @@ type UploadFile struct {
 	TargetPath  string
 	Attachments []string
 	Delete      bool
-	Size        int64
+	size        int64
+	isDir       bool
 }
 
-func (importPackage *ImportPackage) Upload(inputFiles []string, mergeGroups [][]string, progressChan chan int) error {
-	filesToUpload, filesToZip, err := analysePaths(inputFiles, mergeGroups)
+func (f *UploadFile) setSize() error {
+	siz := int64(0)
+	fileInfo, err := os.Stat(f.SourcePath)
+	if fileInfo.IsDir() {
+		return nil
+		f.isDir = true
+	}
+	if err != nil {
+		return err
+	}
+	siz += fileInfo.Size()
+	for _, file := range f.Attachments {
+		fileInfo, err = os.Stat(file)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("the file \"%s\" does not exist", file)
+		} else if err != nil {
+			return err
+		}
+		siz += fileInfo.Size()
+	}
+	f.size = siz
+	f.isDir = false
+	return nil
+}
+
+func (f *UploadFile) GetSize() int64 {
+	if f.size == 0 {
+		f.setSize()
+	}
+	return f.size
+}
+
+func (f *UploadFile) IsDir() bool {
+	return f.isDir
+}
+
+func NewUploadFile(path string, attachments []string) UploadFile {
+	absPath, err := filepath.Abs(path)
+	if err == nil {
+		path = absPath
+	}
+	for i, attachment := range attachments {
+		absPath, err = filepath.Abs(attachment)
+		if err == nil {
+			attachments[i] = absPath
+		}
+	}
+	uploadFile := UploadFile{SourcePath: path, Attachments: attachments}
+	err = uploadFile.setSize()
+	if err != nil {
+		return uploadFile
+	}
+	if !uploadFile.IsDir() {
+		uploadFile.TargetPath = filepath.Base(uploadFile.SourcePath)
+	}
+	return uploadFile
+}
+
+func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan chan int) error {
+	filesToUpload, filesToZip, err := analysePaths(inputFiles)
 	if err != nil {
 		return err
 	}
@@ -222,88 +281,51 @@ func (importPackage *ImportPackage) wait(timeout time.Duration, wg *sync.WaitGro
 	}
 }
 
-func analysePaths(paths []string, mergeGroups [][]string) ([]UploadFile, []UploadFile, error) {
+func analysePaths(files []UploadFile) ([]UploadFile, []UploadFile, error) {
 	var filesToUpload []UploadFile
 	var filesToZip []UploadFile
-	for _, file := range paths {
-		fileInfo, err := os.Stat(file)
-		if os.IsNotExist(err) {
-			return nil, nil, fmt.Errorf("the file \"%s\" does not exist", file)
-		} else if err != nil {
-			continue
-		}
-		if fileInfo.IsDir() {
-			filepath.Walk(file, func(path string, info os.FileInfo, err error) error {
+	for _, file := range files {
+		if file.IsDir() {
+			filepath.Walk(file.SourcePath, func(path string, info os.FileInfo, err error) error {
 				if !info.IsDir() {
 					relativePath := path
-					if strings.HasPrefix(path, file) {
-						relativePath = path[len(file):]
+					if strings.HasPrefix(path, file.SourcePath) {
+						relativePath = path[len(file.SourcePath):]
 					}
 					relativePath = strings.Replace(relativePath, "\\", "/", -1)
 					relativePath = strings.TrimPrefix(relativePath, "/")
 
+					curUploadFile := UploadFile{SourcePath: strings.Replace(path, "\\", "/", -1), TargetPath: relativePath, Delete: false}
+					curUploadFile.setSize()
 					if info.Size() < UPLOAD_CHUCK_SIZE {
-						filesToZip = append(filesToZip, UploadFile{SourcePath: strings.Replace(path, "\\", "/", -1), TargetPath: relativePath, Delete: false, Size: info.Size()})
+						filesToZip = append(filesToZip, curUploadFile)
 					} else {
-						filesToUpload = append(filesToUpload, UploadFile{SourcePath: strings.Replace(path, "\\", "/", -1), TargetPath: relativePath, Delete: false, Size: info.Size()})
+						filesToUpload = append(filesToUpload, curUploadFile)
 					}
 				}
 				return nil
 			})
 		} else {
-			absPath, err := filepath.Abs(file)
-			if err != nil {
-				absPath = file
-			}
-			if fileInfo.Size() < UPLOAD_CHUCK_SIZE {
-				filesToZip = append(filesToZip, UploadFile{SourcePath: absPath, TargetPath: filepath.Base(file), Delete: false, Size: fileInfo.Size()})
+			if file.GetSize() < UPLOAD_CHUCK_SIZE && len(file.Attachments) == 0 {
+				filesToZip = append(filesToZip, file)
 			} else {
-				filesToUpload = append(filesToUpload, UploadFile{SourcePath: absPath, TargetPath: filepath.Base(file), Delete: false, Size: fileInfo.Size()})
+				filesToUpload = append(filesToUpload, file)
 			}
 		}
 	}
-	for _, group := range mergeGroups {
-		siz := int64(0)
-		var attachments []string
-		var absPath string
-		var targetPath string
-		for i, file := range group {
-			fileInfo, err := os.Stat(file)
-			if err != nil {
-				break
-			}
-			siz += fileInfo.Size()
-			if i == 0 {
-				absPath, err = filepath.Abs(file)
-				targetPath = filepath.Base(file)
-				if err != nil {
-					absPath = file
-				}
-			} else {
-				attAbsPath, err := filepath.Abs(file)
-				if err != nil {
-					attAbsPath = file
-				}
-				attachments = append(attachments, attAbsPath)
-			}
-
-		}
-		filesToUpload = append(filesToUpload, UploadFile{SourcePath: absPath, TargetPath: targetPath, Delete: false, Size: siz, Attachments: attachments})
-	}
-
 	return filesToUpload, filesToZip, nil
 }
 
 func getTotalSize(filesToUpload []UploadFile, filesToZip []UploadFile) int64 {
 	siz := int64(0)
 	for _, file := range filesToZip {
-		siz += file.Size
+		siz += file.GetSize()
 		siz += int64(len(file.TargetPath))
 		siz += 150 // header size (approximate)
 	}
 
 	for _, file := range filesToUpload {
-		siz += file.Size
+		siz += file.GetSize()
 	}
 	return siz
 }

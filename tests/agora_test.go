@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GyroTools/gtagora-connector-go/agora"
+	"github.com/GyroTools/gtagora-connector-go/agora/models"
 	"github.com/GyroTools/gtagora-connector-go/internals/http"
 )
 
@@ -359,16 +360,19 @@ func TestUpload(t *testing.T) {
 		}
 	}()
 
-	var files []string
+	var files []models.UploadFile
 	for i := 0; i < 15; i++ {
-		files = append(files, filepath.Join(tempDir, fmt.Sprintf("file%02d.txt", i)))
+		uploadFile := models.NewUploadFile(filepath.Join(tempDir, fmt.Sprintf("file%02d.txt", i)), nil)
+		files = append(files, uploadFile)
 	}
-	files = append(files, filepath.Join(tempDir, "file_large.txt"))
-	mergeGroups := [][]string{
-		{filepath.Join(tempDir, "file15.txt"), filepath.Join(tempDir, "file16.txt")},
-		{filepath.Join(tempDir, "file17.txt"), filepath.Join(tempDir, "file18.txt"), filepath.Join(tempDir, "file19.txt")},
-	}
-	err = importPackage.Upload(files, mergeGroups, progressChan)
+	largeUploadFile := models.NewUploadFile(filepath.Join(tempDir, "file_large.txt"), nil)
+	files = append(files, largeUploadFile)
+
+	group1 := models.NewUploadFile(filepath.Join(tempDir, "file15.txt"), []string{filepath.Join(tempDir, "file16.txt")})
+	group2 := models.NewUploadFile(filepath.Join(tempDir, "file17.txt"), []string{filepath.Join(tempDir, "file18.txt"), filepath.Join(tempDir, "file19.txt")})
+	files = append(files, group1)
+	files = append(files, group2)
+	err = importPackage.Upload(files, progressChan)
 	if err != nil {
 		t.Errorf("cannot upload files: %s", err.Error())
 		return
