@@ -85,6 +85,10 @@ func (a *Agora) NewImportPackage() (*models.ImportPackage, error) {
 	return &importPackage, nil
 }
 
+func (a *Agora) NewUploadFile(path string, attachments []string) models.UploadFile {
+	return models.NewUploadFile(path, attachments)
+}
+
 func NewAgora(url string, apiKey string, verifyCert bool) *Agora {
 	return &Agora{Client: http.NewClient(url, apiKey, verifyCert)}
 }
