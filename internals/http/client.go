@@ -13,12 +13,9 @@ import (
 	"time"
 )
 
-const (
-	DefaultTimeout = 10
-)
-
 type Client struct {
-	conn Connection
+	conn           Connection
+	defaultTimeout time.Duration
 }
 
 type ApiKeyResponse struct {
@@ -34,7 +31,7 @@ type BaseModel struct {
 
 func NewClient(url string, apiKey string, verifyCert bool) *Client {
 	connection := &ApiKeyConnection{verifyCert: verifyCert, apiKey: apiKey, url: url}
-	return &Client{conn: connection}
+	return &Client{conn: connection, defaultTimeout: 10 * time.Second}
 }
 
 func NewPasswordClient(url string, username string, password string, verifyCert bool) *Client {
@@ -42,8 +39,12 @@ func NewPasswordClient(url string, username string, password string, verifyCert 
 	return &Client{conn: &connection}
 }
 
+func (client *Client) SetDefaultTimeout(timeoutSec time.Duration) {
+	client.defaultTimeout = timeoutSec
+}
+
 func (client *Client) Ping() error {
-	resp, err := client.Get("/api/v1/version/", time.Duration(5*time.Second))
+	resp, err := client.Get("/api/v1/version/", -1)
 	if err != nil {
 		return err
 	} else if resp.StatusCode != 200 {
@@ -53,7 +54,7 @@ func (client *Client) Ping() error {
 }
 
 func (client *Client) CheckConnection() error {
-	resp, err := client.Get("/api/v1/user/current/", time.Duration(5*time.Second))
+	resp, err := client.Get("/api/v1/user/current/", -1)
 	if err != nil {
 		return err
 	} else if resp.StatusCode != 200 {
@@ -187,7 +188,7 @@ func (client *Client) Get(path string, timeout time.Duration) (*http.Response, e
 	}
 	url := client.GetUrl(path)
 	if timeout == -1 {
-		timeout = DefaultTimeout * time.Second // Set the default timeout duration
+		timeout = client.defaultTimeout // Set the default timeout duration
 	}
 	httpClient := &http.Client{
 		Timeout: timeout,
@@ -217,7 +218,7 @@ func (client *Client) Post(path string, body io.Reader, timeout time.Duration) (
 	}
 	url := client.GetUrl(path)
 	if timeout == -1 {
-		timeout = DefaultTimeout * time.Second // Set the default timeout duration
+		timeout = client.defaultTimeout
 	}
 	httpClient := &http.Client{
 		Timeout: timeout,

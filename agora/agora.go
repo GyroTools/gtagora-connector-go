@@ -3,6 +3,7 @@ package agora
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/GyroTools/gtagora-connector-go/agora/models"
 	"github.com/GyroTools/gtagora-connector-go/internals/http"
@@ -16,6 +17,10 @@ type Agora struct {
 func Ping(url string) error {
 	client := http.NewClient(url, "", false)
 	return client.Ping()
+}
+
+func (a *Agora) SetTimeout(timout time.Duration) {
+	a.Client.SetDefaultTimeout(timout)
 }
 
 func (a *Agora) GetApiKey() (string, error) {

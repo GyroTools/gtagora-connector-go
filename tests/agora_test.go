@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GyroTools/gtagora-connector-go/agora"
 	"github.com/GyroTools/gtagora-connector-go/internals/http"
@@ -109,6 +110,22 @@ func TestConnect(t *testing.T) {
 	if err != nil {
 		t.Errorf("could not connect to Agora: %s", err.Error())
 	}
+}
+
+func TestTimeout(t *testing.T) {
+	apiKey := os.Getenv("AGORA_API_KEY")
+	if len(apiKey) == 0 {
+		t.Errorf("did not find an api key in the environment variable AGORA_API_KEY")
+		return
+	}
+
+	url := server
+	agora, err := agora.Create(url, apiKey, false)
+	if err != nil {
+		t.Errorf("could not connect to Agora: %s", err.Error())
+	}
+	agora.SetTimeout(5 * time.Second)
+	agora.Client.CheckConnection()
 }
 
 func TestConnectWithPassword(t *testing.T) {
