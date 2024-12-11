@@ -21,6 +21,7 @@ import (
 )
 
 const (
+	PARALLEL_UPLOADS        = 3
 	UPLOAD_CHUCK_SIZE       = 100 * 1024 * 1024
 	MAX_ZIP_SIZE            = 1024 * 1024 * 1024
 	FAKE_PROGRESS_THRESHOLD = 5 * 1024 * 1024
@@ -74,19 +75,63 @@ type UploadFile struct {
 	TargetPath  string
 	Attachments []string
 	Delete      bool
-	size        int64
+	Size        int64
 	isDir       bool
+	NrFiles     int
+}
+
+type ProgressType string
+
+const (
+	TypeUploadInitialized   ProgressType = "upload_initialized"
+	TypeUploadStarted       ProgressType = "upload_started"
+	TypeUploadCompleted     ProgressType = "upload_completed"
+	TypeFileUploadStarted   ProgressType = "file_upload_started"
+	TypeFileUploadCompleted ProgressType = "file_upload_completed"
+	TypeFileProgress        ProgressType = "file_progress"
+	TypeProgress            ProgressType = "progress"
+	TypeMessage             ProgressType = "message"
+	TypeUploadError         ProgressType = "upload_error"
+)
+
+type UploadProgress struct {
+	Type ProgressType
+	Data interface{}
+}
+
+type UploadProgressInitData struct {
+	FilesToZip      int
+	FilesToUpload   int
+	TotalSize       int64
+	NrFilesToUpload int
+}
+
+type UploadProgressTransferData struct {
+	File            UploadFile
+	TotalSize       int64
+	BytesTransfered int64
+	BytesIncrement  int64
+}
+
+func (progressData *UploadProgressTransferData) AddBytes(bytes int64) {
+	progressData.BytesTransfered += bytes
+	progressData.BytesIncrement = bytes
+}
+
+func (progressData *UploadProgressTransferData) Complete() {
+	progressData.BytesTransfered = progressData.TotalSize
+	progressData.BytesIncrement = 0
 }
 
 func (f *UploadFile) setSize() error {
 	siz := int64(0)
 	fileInfo, err := os.Stat(f.SourcePath)
-	if fileInfo.IsDir() {
-		return nil
-		f.isDir = true
-	}
 	if err != nil {
 		return err
+	}
+	if fileInfo.IsDir() {
+		f.isDir = true
+		return nil
 	}
 	siz += fileInfo.Size()
 	for _, file := range f.Attachments {
@@ -98,56 +143,61 @@ func (f *UploadFile) setSize() error {
 		}
 		siz += fileInfo.Size()
 	}
-	f.size = siz
+	f.Size = siz
 	f.isDir = false
 	return nil
 }
 
 func (f *UploadFile) GetSize() int64 {
-	if f.size == 0 {
+	if f.Size == 0 {
 		f.setSize()
 	}
-	return f.size
+	return f.Size
 }
 
 func (f *UploadFile) IsDir() bool {
 	return f.isDir
 }
 
-func NewUploadFile(path string, attachments []string) UploadFile {
+func NewUploadFile(path string, attachments []string) (UploadFile, error) {
 	absPath, err := filepath.Abs(path)
-	if err == nil {
-		path = absPath
+	if err != nil {
+		return UploadFile{}, err
 	}
+	path = absPath
 	for i, attachment := range attachments {
 		absPath, err = filepath.Abs(attachment)
-		if err == nil {
-			attachments[i] = absPath
+		if err != nil {
+			return UploadFile{}, err
 		}
+		attachments[i] = absPath
+
 	}
 	uploadFile := UploadFile{SourcePath: path, Attachments: attachments}
 	err = uploadFile.setSize()
 	if err != nil {
-		return uploadFile
+		return uploadFile, err
 	}
 	if !uploadFile.IsDir() {
 		uploadFile.TargetPath = filepath.Base(uploadFile.SourcePath)
 	}
-	return uploadFile
+	return uploadFile, nil
 }
 
-func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan chan int) error {
-	filesToUpload, filesToZip, err := analysePaths(inputFiles)
+func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan chan UploadProgress) error {
+	progressChan <- UploadProgress{Type: TypeUploadStarted, Data: importPackage.Id}
+	filesToUpload, filesToZip, nrFilesToUpload, err := analysePaths(inputFiles)
 	if err != nil {
 		return err
 	}
 	totalSize := getTotalSize(filesToUpload, filesToZip)
+	progressChan <- UploadProgress{Type: TypeUploadInitialized, Data: UploadProgressInitData{FilesToZip: len(filesToZip), FilesToUpload: len(filesToUpload), TotalSize: totalSize, NrFilesToUpload: nrFilesToUpload}}
 	uploadedSize := int64(0)
 
 	requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("/api/v1/import/%d/upload/", importPackage.Id))
 
 	// we have 2 threadpools here. One performs the large file upload and the zipping in parallel. One performs a parallel file upload
-	parallel_uploads := 3
+	parallel_uploads := PARALLEL_UPLOADS
 	fake := false
 
 	apiKey, err := importPackage.Client.GetApiKey()
@@ -157,23 +207,25 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 
 	// Adding routines to workgroup and running then
 	fileCh := make(chan UploadFile)
-	uploadBytesCh := make(chan int64)
+	uploadBytesCh := make(chan UploadProgressTransferData)
 	wg := new(sync.WaitGroup)
 
 	go func() {
-		for bytes := range uploadBytesCh {
-			uploadedSize += bytes
+		for prog := range uploadBytesCh {
+			progressChan <- UploadProgress{Type: TypeFileProgress, Data: prog}
+			uploadedSize += prog.BytesIncrement
 			progress := int(100 * uploadedSize / totalSize)
 			if progress >= 100 {
 				progress = 99
 			}
-			progressChan <- progress
+			uploadProgress := UploadProgress{Type: TypeProgress, Data: progress}
+			progressChan <- uploadProgress
 		}
 	}()
 
 	for i := 0; i < parallel_uploads; i++ {
 		wg.Add(1)
-		go uploadWorker(fileCh, uploadBytesCh, requestUrl, apiKey, fake, wg)
+		go uploadWorker(fileCh, uploadBytesCh, progressChan, requestUrl, apiKey, fake, wg)
 	}
 
 	tempDir, err := os.MkdirTemp("", "agora_interface_go")
@@ -185,8 +237,8 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 	wg_upload_zip := new(sync.WaitGroup)
 	wg_upload_zip.Add(2)
 
-	go uploadFiles(fileCh, requestUrl, apiKey, filesToUpload, wg_upload_zip)
-	go zipAndUpload(fileCh, requestUrl, apiKey, filesToZip, tempDir, wg_upload_zip)
+	go uploadFiles(fileCh, filesToUpload, wg_upload_zip)
+	go zipAndUpload(fileCh, filesToZip, tempDir, wg_upload_zip)
 	wg_upload_zip.Wait()
 
 	// Closing channel (waiting in goroutines won't continue any more)
@@ -195,6 +247,7 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 	// Waiting for all goroutines to finish (otherwise they die as main routine dies)
 	wg.Wait()
 
+	progressChan <- UploadProgress{Type: TypeUploadCompleted, Data: importPackage.Id}
 	return nil
 }
 
@@ -281,9 +334,10 @@ func (importPackage *ImportPackage) wait(timeout time.Duration, wg *sync.WaitGro
 	}
 }
 
-func analysePaths(files []UploadFile) ([]UploadFile, []UploadFile, error) {
+func analysePaths(files []UploadFile) ([]UploadFile, []UploadFile, int, error) {
 	var filesToUpload []UploadFile
 	var filesToZip []UploadFile
+	sizeZippedFiles := int64(0)
 	for _, file := range files {
 		if file.IsDir() {
 			filepath.Walk(file.SourcePath, func(path string, info os.FileInfo, err error) error {
@@ -299,6 +353,7 @@ func analysePaths(files []UploadFile) ([]UploadFile, []UploadFile, error) {
 					curUploadFile.setSize()
 					if info.Size() < UPLOAD_CHUCK_SIZE {
 						filesToZip = append(filesToZip, curUploadFile)
+						sizeZippedFiles += curUploadFile.GetSize()
 					} else {
 						filesToUpload = append(filesToUpload, curUploadFile)
 					}
@@ -313,7 +368,9 @@ func analysePaths(files []UploadFile) ([]UploadFile, []UploadFile, error) {
 			}
 		}
 	}
-	return filesToUpload, filesToZip, nil
+	nrZipFiles := sizeZippedFiles/int64(MAX_ZIP_SIZE) + 1
+	nrFilesToUpload := len(filesToUpload) + int(nrZipFiles)
+	return filesToUpload, filesToZip, nrFilesToUpload, nil
 }
 
 func getTotalSize(filesToUpload []UploadFile, filesToZip []UploadFile) int64 {
@@ -330,17 +387,24 @@ func getTotalSize(filesToUpload []UploadFile, filesToZip []UploadFile) int64 {
 	return siz
 }
 
-func uploadWorker(fileChan chan UploadFile, uploadBytesCh chan int64, request_url string, api_key string, fake bool, wg *sync.WaitGroup) {
+func uploadWorker(fileChan chan UploadFile, uploadBytesCh chan UploadProgressTransferData, progressChan chan UploadProgress, request_url string, api_key string, fake bool, wg *sync.WaitGroup) {
 	// Decreasing internal counter for wait-group as soon as goroutine finishes
 	defer wg.Done()
 
 	transferRate := int64(5 * 1024 * 1024)
+	var err error
 	for file := range fileChan {
-		transferRate, _ = uploadFile(uploadBytesCh, request_url, api_key, file, fake, transferRate)
+		progressChan <- UploadProgress{Type: TypeFileUploadStarted, Data: file}
+		transferRate, err = uploadFile(uploadBytesCh, request_url, api_key, file, fake, transferRate)
+		if err == nil {
+			progressChan <- UploadProgress{Type: TypeFileUploadCompleted, Data: file}
+		} else {
+			progressChan <- UploadProgress{Type: TypeUploadError, Data: err}
+		}
 	}
 }
 
-func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, file UploadFile, fake bool, transferRate int64) (int64, error) {
+func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url string, api_key string, file UploadFile, fake bool, transferRate int64) (int64, error) {
 	buffer := make([]byte, UPLOAD_CHUCK_SIZE)
 	if file.Delete {
 		defer os.Remove(file.SourcePath)
@@ -360,6 +424,7 @@ func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, fi
 		totalChunks += curNrChunks
 	}
 	uuid := uuid.New()
+	fileUploadProgress := UploadProgressTransferData{File: file, TotalSize: totalSize, BytesIncrement: 0, BytesTransfered: 0}
 
 	curChunkNr := 0
 	for j, curFile := range files {
@@ -404,8 +469,9 @@ func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, fi
 							if nrBytesSent+transferRate >= int64(n) {
 								return
 							}
-							uploadBytesCh <- transferRate
 							nrBytesSent += transferRate
+							fileUploadProgress.AddBytes(transferRate)
+							uploadBytesCh <- fileUploadProgress
 						case <-cancel:
 							// Task cancellation requested
 							return
@@ -421,7 +487,8 @@ func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, fi
 				return transferRate, err
 			}
 			duration := time.Since(start)
-			uploadBytesCh <- int64(n) - nrBytesSent
+			fileUploadProgress.AddBytes(int64(n) - nrBytesSent)
+			uploadBytesCh <- fileUploadProgress
 
 			// calculate the transfer rate
 			dur := int64(duration.Milliseconds())
@@ -435,6 +502,8 @@ func uploadFile(uploadBytesCh chan int64, request_url string, api_key string, fi
 			}
 		}
 	}
+	fileUploadProgress.Complete()
+	uploadBytesCh <- fileUploadProgress
 	return transferRate, nil
 }
 
@@ -495,7 +564,7 @@ func uploadChunk(client *http.Client, url string, api_key string, values map[str
 	return nil
 }
 
-func uploadFiles(fileCh chan UploadFile, request_url string, api_key string, files_to_upload []UploadFile, wg *sync.WaitGroup) error {
+func uploadFiles(fileCh chan UploadFile, files_to_upload []UploadFile, wg *sync.WaitGroup) error {
 	defer wg.Done()
 
 	// Processing all links by spreading them to `free` goroutines
@@ -505,7 +574,7 @@ func uploadFiles(fileCh chan UploadFile, request_url string, api_key string, fil
 	return nil
 }
 
-func zipAndUpload(fileCh chan UploadFile, request_url string, api_key string, files_to_zip []UploadFile, temp_dir string, wg *sync.WaitGroup) error {
+func zipAndUpload(fileCh chan UploadFile, files_to_zip []UploadFile, temp_dir string, wg *sync.WaitGroup) error {
 	defer wg.Done()
 
 	index := 0
@@ -516,17 +585,14 @@ func zipAndUpload(fileCh chan UploadFile, request_url string, api_key string, fi
 		if err != nil {
 			return err
 		}
-		defer file.Close()
+		nrFilesInZip := 0
 
 		w := zip.NewWriter(file)
-		defer w.Close()
-
 		for _, file_to_zip := range files_to_zip[index:] {
 			file, err := os.Open(file_to_zip.SourcePath)
 			if err != nil {
 				return err
 			}
-			defer file.Close()
 
 			relative_path := file_to_zip.TargetPath
 			header := &zip.FileHeader{
@@ -534,8 +600,6 @@ func zipAndUpload(fileCh chan UploadFile, request_url string, api_key string, fi
 				Method: zip.Store,
 			}
 			f, err := w.CreateHeader(header)
-
-			//f, err := w.Create(relative_path)
 			if err != nil {
 				return err
 			}
@@ -546,6 +610,7 @@ func zipAndUpload(fileCh chan UploadFile, request_url string, api_key string, fi
 			}
 
 			index += 1
+			nrFilesInZip += 1
 
 			fileInfo, err := os.Stat(zip_path)
 			if err == nil && fileInfo.Size() > MAX_ZIP_SIZE {
@@ -553,7 +618,8 @@ func zipAndUpload(fileCh chan UploadFile, request_url string, api_key string, fi
 			}
 		}
 		w.Close()
-		upload_file := UploadFile{SourcePath: zip_path, TargetPath: zip_filename, Delete: true}
+		file.Close()
+		upload_file := UploadFile{SourcePath: zip_path, TargetPath: zip_filename, Delete: true, NrFiles: nrFilesInZip}
 		fileCh <- upload_file
 	}
 
