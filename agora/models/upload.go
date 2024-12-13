@@ -3,6 +3,9 @@ package models
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +13,7 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +29,7 @@ const (
 	UPLOAD_CHUCK_SIZE       = 100 * 1024 * 1024
 	MAX_ZIP_SIZE            = 1024 * 1024 * 1024
 	FAKE_PROGRESS_THRESHOLD = 5 * 1024 * 1024
+	ZIPPED_UPLOAD_THRESHOLD = 5
 	STATE_UPLOADING         = 1
 	STATE_CHECKING          = 2
 	STATE_ANALYZING         = 3
@@ -51,6 +56,9 @@ type ImportPackage struct {
 	TargetType       string `json:"target_type"`
 	TimelineItems    []int  `json:"timeline_items"`
 	User             int    `json:"user"`
+	Files            []UploadFile
+	UploadFailed     []UploadFile
+	importFinished   bool
 
 	agoraHttp.BaseModel
 }
@@ -70,6 +78,38 @@ type FlowFile struct {
 	Updated             string        `json:"updated"`
 }
 
+type ImportProgress struct {
+	State    int `json:"state"`
+	Progress int `json:"progress"`
+}
+
+type Datafile struct {
+	Id      int    `json:"state"`
+	Path    string `json:"path"`
+	Sha1    string `json:"sha1"`
+	Dataset int    `json:"dataset"`
+	Created bool   `json:"created"`
+}
+
+type ImportResult struct {
+	Datafiles          []Datafile `json:"datafiles"`
+	NrFiles            int
+	NrUploaded         int
+	NrUploadFailed     int
+	NrUploadHashFailed int
+	NrImported         int
+	NrExisted          int
+	NrIgnored          int
+	NrHashFailed       int
+	Files              []string
+	UploadFailed       []string
+	Imported           []string
+	Existed            []string
+	Ignored            []string
+	HashFailed         []string
+	UploadHashFailed   []string
+}
+
 type UploadFile struct {
 	SourcePath  string
 	TargetPath  string
@@ -77,7 +117,7 @@ type UploadFile struct {
 	Delete      bool
 	Size        int64
 	isDir       bool
-	NrFiles     int
+	Err         error
 }
 
 type ProgressType string
@@ -89,9 +129,10 @@ const (
 	TypeFileUploadStarted   ProgressType = "file_upload_started"
 	TypeFileUploadCompleted ProgressType = "file_upload_completed"
 	TypeFileProgress        ProgressType = "file_progress"
-	TypeProgress            ProgressType = "progress"
+	TypeProgressPct         ProgressType = "progress"
 	TypeMessage             ProgressType = "message"
 	TypeUploadError         ProgressType = "upload_error"
+	TypeImportProgress      ProgressType = "import_progress"
 )
 
 type UploadProgress struct {
@@ -100,10 +141,10 @@ type UploadProgress struct {
 }
 
 type UploadProgressInitData struct {
-	FilesToZip      int
-	FilesToUpload   int
-	TotalSize       int64
-	NrFilesToUpload int
+	FilesToZip    int
+	ZipFiles      int
+	FilesToUpload int
+	TotalSize     int64
 }
 
 type UploadProgressTransferData struct {
@@ -111,16 +152,25 @@ type UploadProgressTransferData struct {
 	TotalSize       int64
 	BytesTransfered int64
 	BytesIncrement  int64
+	channel         chan UploadProgressTransferData
 }
 
 func (progressData *UploadProgressTransferData) AddBytes(bytes int64) {
 	progressData.BytesTransfered += bytes
 	progressData.BytesIncrement = bytes
+	progressData.channel <- *progressData
 }
 
 func (progressData *UploadProgressTransferData) Complete() {
 	progressData.BytesTransfered = progressData.TotalSize
 	progressData.BytesIncrement = 0
+	progressData.channel <- *progressData
+}
+
+func (progressData *UploadProgressTransferData) Error(err error) {
+	progressData.File.Err = err
+	progressData.BytesIncrement = 0
+	progressData.channel <- *progressData
 }
 
 func (f *UploadFile) setSize() error {
@@ -186,12 +236,18 @@ func NewUploadFile(path string, attachments []string) (UploadFile, error) {
 
 func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan chan UploadProgress) error {
 	progressChan <- UploadProgress{Type: TypeUploadStarted, Data: importPackage.Id}
-	filesToUpload, filesToZip, nrFilesToUpload, err := analysePaths(inputFiles)
+	filesToUpload, filesToZip, nrZipFiles, err := analysePaths(inputFiles)
 	if err != nil {
 		return err
 	}
+	// do not zip files if there are only a few files (ZIPPED_UPLOAD_THRESHOLD)
+	if len(filesToZip) < ZIPPED_UPLOAD_THRESHOLD {
+		filesToUpload = append(filesToUpload, filesToZip...)
+		filesToZip = []UploadFile{}
+		nrZipFiles = 0
+	}
 	totalSize := getTotalSize(filesToUpload, filesToZip)
-	progressChan <- UploadProgress{Type: TypeUploadInitialized, Data: UploadProgressInitData{FilesToZip: len(filesToZip), FilesToUpload: len(filesToUpload), TotalSize: totalSize, NrFilesToUpload: nrFilesToUpload}}
+	progressChan <- UploadProgress{Type: TypeUploadInitialized, Data: UploadProgressInitData{FilesToZip: len(filesToZip), FilesToUpload: len(filesToUpload), TotalSize: totalSize, ZipFiles: nrZipFiles}}
 	uploadedSize := int64(0)
 
 	requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("/api/v1/import/%d/upload/", importPackage.Id))
@@ -212,13 +268,19 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 
 	go func() {
 		for prog := range uploadBytesCh {
+			if prog.File.Err != nil {
+				importPackage.UploadFailed = append(importPackage.UploadFailed, prog.File)
+				progressChan <- UploadProgress{Type: TypeUploadError, Data: prog.File}
+			} else if prog.BytesTransfered == prog.TotalSize {
+				progressChan <- UploadProgress{Type: TypeFileUploadCompleted, Data: prog.File}
+			}
 			progressChan <- UploadProgress{Type: TypeFileProgress, Data: prog}
 			uploadedSize += prog.BytesIncrement
 			progress := int(100 * uploadedSize / totalSize)
 			if progress >= 100 {
 				progress = 99
 			}
-			uploadProgress := UploadProgress{Type: TypeProgress, Data: progress}
+			uploadProgress := UploadProgress{Type: TypeProgressPct, Data: progress}
 			progressChan <- uploadProgress
 		}
 	}()
@@ -248,6 +310,7 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 	wg.Wait()
 
 	progressChan <- UploadProgress{Type: TypeUploadCompleted, Data: importPackage.Id}
+	importPackage.Files = append(filesToUpload, filesToZip...)
 	return nil
 }
 
@@ -288,11 +351,105 @@ func (importPackage *ImportPackage) Complete(targetFolderId int, jsonImportFile 
 
 	if wg != nil {
 		// wait for completion
-		timeout := time.Duration(1 * time.Hour)
+		timeout := time.Duration(1) * time.Hour
 		go importPackage.wait(timeout, wg)
 	}
 
 	return nil
+}
+
+func (importPackage *ImportPackage) WaitForImport(timeout time.Duration, progressChan chan UploadProgress) error {
+	if importPackage.State == STATE_ERROR {
+		return nil
+	}
+
+	startTime := time.Now()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-time.After(timeout):
+			return errors.New("import progress timeout")
+		case <-ticker.C:
+			curProgress, err := importPackage.progress()
+			progressChan <- UploadProgress{Type: TypeImportProgress, Data: curProgress.Progress}
+			if err != nil {
+				return err
+			}
+			if curProgress.State == STATE_FINISHED && curProgress.Progress == 100 {
+				progressChan <- UploadProgress{Type: TypeImportProgress, Data: 100}
+				importPackage.importFinished = true
+				return nil
+			}
+		}
+		if time.Since(startTime) > timeout {
+			return errors.New("import progress timeout")
+		}
+	}
+}
+
+func (importPackage *ImportPackage) Result() (*ImportResult, error) {
+	var result *ImportResult
+	var err error
+	if importPackage.importFinished {
+		result, err = importPackage.result()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		result = &ImportResult{}
+	}
+	result.NrFiles = len(importPackage.Files)
+	for _, file := range importPackage.Files {
+		result.Files = append(result.Files, file.SourcePath)
+	}
+	for _, file := range importPackage.UploadFailed {
+		err := file.Err
+		if strings.Contains(err.Error(), "hashes do not match for file") {
+			result.NrUploadHashFailed += 1
+			result.UploadHashFailed = append(result.UploadHashFailed, file.SourcePath)
+		} else {
+			result.NrUploadFailed += 1
+			result.UploadFailed = append(result.UploadFailed, file.SourcePath)
+		}
+	}
+	result.NrUploaded = result.NrFiles - result.NrUploadFailed
+
+	if result.Datafiles != nil {
+		for _, file := range importPackage.Files {
+			found := false
+			for _, datafile := range result.Datafiles {
+				if filepath.Clean(file.TargetPath) == filepath.Clean(datafile.Path) {
+					if datafile.Created {
+						hash, err := sha1Hash(file.SourcePath)
+						if err == nil {
+							if hash != datafile.Sha1 {
+								result.NrHashFailed += 1
+								result.HashFailed = append(result.HashFailed, file.SourcePath)
+							} else {
+								result.NrImported += 1
+								result.Imported = append(result.Imported, file.SourcePath)
+							}
+						} else {
+							result.NrImported += 1
+							result.Imported = append(result.Imported, file.SourcePath)
+						}
+					} else {
+						result.NrExisted += 1
+						result.Existed = append(result.Existed, file.SourcePath)
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				result.NrIgnored += 1
+				result.Ignored = append(result.Ignored, file.SourcePath)
+			}
+		}
+	}
+	return result, nil
 }
 
 func (importPackage *ImportPackage) update() error {
@@ -304,6 +461,89 @@ func (importPackage *ImportPackage) update() error {
 	return nil
 }
 
+func (importPackage *ImportPackage) progress() (*ImportProgress, error) {
+	requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("%s%d/progress", ImportPackageURL, importPackage.Id))
+	resp, err := importPackage.Client.Get(requestUrl, -1)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var curProgress ImportProgress
+	err = json.NewDecoder(resp.Body).Decode(&curProgress)
+	if err != nil {
+		return nil, err
+	}
+	return &curProgress, nil
+}
+
+func verifyHash(curFile string, uid string, apiKey string, uploadUrl string) (bool, error) {
+	parsedURL, err := url.Parse(uploadUrl)
+	if err != nil {
+		return false, errors.New("error parsing URL: " + err.Error())
+	}
+	parsedURL.Path = fmt.Sprintf("/api/v1/flowfile/%s/", uid)
+	url := parsedURL.String()
+	client := agoraHttp.NewClient(url, apiKey, false)
+
+	hashCheckSuccess := false
+	hashLocal, err := sha256Hash(curFile)
+	if err != nil {
+		return false, err
+	}
+	var hashServer string
+
+	for hashServer == "" {
+		response, err := client.Get("", -1)
+		if err != nil {
+			return false, err
+		}
+		defer response.Body.Close()
+
+		if response.StatusCode == http.StatusOK {
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				return false, err
+			}
+
+			var data FlowFile
+			err = json.Unmarshal(body, &data)
+			if err != nil {
+				return false, err
+			}
+
+			if data.State == 2 {
+				hashServer = data.ContentHash
+				if hashLocal != hashServer {
+					continue
+				} else {
+					hashCheckSuccess = true
+					break
+				}
+			} else if data.State == 3 || data.State == 5 {
+				return false, fmt.Errorf("failed to upload %v: there was an error joining the chunks", curFile)
+			}
+		} else {
+			return false, errors.New("failed to get the hash of the file from the server")
+		}
+	}
+	return hashCheckSuccess, nil
+}
+
+func (importPackage *ImportPackage) result() (*ImportResult, error) {
+	requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("%s%d/result", ImportPackageURL, importPackage.Id))
+	resp, err := importPackage.Client.Get(requestUrl, -1)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result ImportResult
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 func (importPackage *ImportPackage) wait(timeout time.Duration, wg *sync.WaitGroup) error {
 	defer wg.Done()
 	if importPackage.State == STATE_FINISHED || importPackage.State == STATE_ERROR {
@@ -311,13 +551,12 @@ func (importPackage *ImportPackage) wait(timeout time.Duration, wg *sync.WaitGro
 	}
 
 	startTime := time.Now()
-	timeoutDuration := time.Duration(timeout) * time.Second
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-time.After(timeoutDuration):
+		case <-time.After(timeout):
 			return errors.New("upload progress timeout")
 		case <-ticker.C:
 			err := importPackage.update()
@@ -328,7 +567,7 @@ func (importPackage *ImportPackage) wait(timeout time.Duration, wg *sync.WaitGro
 				return nil
 			}
 		}
-		if time.Since(startTime) > timeoutDuration {
+		if time.Since(startTime) > timeout {
 			return errors.New("upload progress timeout")
 		}
 	}
@@ -369,8 +608,7 @@ func analysePaths(files []UploadFile) ([]UploadFile, []UploadFile, int, error) {
 		}
 	}
 	nrZipFiles := sizeZippedFiles/int64(MAX_ZIP_SIZE) + 1
-	nrFilesToUpload := len(filesToUpload) + int(nrZipFiles)
-	return filesToUpload, filesToZip, nrFilesToUpload, nil
+	return filesToUpload, filesToZip, int(nrZipFiles), nil
 }
 
 func getTotalSize(filesToUpload []UploadFile, filesToZip []UploadFile) int64 {
@@ -387,24 +625,51 @@ func getTotalSize(filesToUpload []UploadFile, filesToZip []UploadFile) int64 {
 	return siz
 }
 
+func sha1Hash(file string) (string, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha1.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+
+	hash := h.Sum(nil)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+func sha256Hash(file string) (string, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+
+	hash := h.Sum(nil)
+	return hex.EncodeToString(hash[:]), nil
+}
+
 func uploadWorker(fileChan chan UploadFile, uploadBytesCh chan UploadProgressTransferData, progressChan chan UploadProgress, request_url string, api_key string, fake bool, wg *sync.WaitGroup) {
 	// Decreasing internal counter for wait-group as soon as goroutine finishes
 	defer wg.Done()
 
 	transferRate := int64(5 * 1024 * 1024)
-	var err error
 	for file := range fileChan {
 		progressChan <- UploadProgress{Type: TypeFileUploadStarted, Data: file}
-		transferRate, err = uploadFile(uploadBytesCh, request_url, api_key, file, fake, transferRate)
-		if err == nil {
-			progressChan <- UploadProgress{Type: TypeFileUploadCompleted, Data: file}
-		} else {
-			progressChan <- UploadProgress{Type: TypeUploadError, Data: err}
-		}
+		transferRate, _ = uploadFile(uploadBytesCh, request_url, api_key, file, fake, transferRate)
 	}
 }
 
 func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url string, api_key string, file UploadFile, fake bool, transferRate int64) (int64, error) {
+	fileUploadProgress := UploadProgressTransferData{File: file, BytesIncrement: 0, BytesTransfered: 0, channel: uploadBytesCh}
 	buffer := make([]byte, UPLOAD_CHUCK_SIZE)
 	if file.Delete {
 		defer os.Remove(file.SourcePath)
@@ -416,6 +681,7 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 	for _, curFile := range files {
 		fileInfo, err := os.Stat(curFile)
 		if err != nil {
+			fileUploadProgress.Error(err)
 			return transferRate, err
 		}
 		totalSize += fileInfo.Size()
@@ -424,19 +690,21 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 		totalChunks += curNrChunks
 	}
 	uuid := uuid.New()
-	fileUploadProgress := UploadProgressTransferData{File: file, TotalSize: totalSize, BytesIncrement: 0, BytesTransfered: 0}
+	fileUploadProgress.TotalSize = totalSize
 
 	curChunkNr := 0
 	for j, curFile := range files {
 		client := &http.Client{}
 		r, err := os.Open(curFile)
 		if err != nil {
+			fileUploadProgress.Error(err)
 			return transferRate, err
 		}
 		defer r.Close()
 		for i := 0; i < nrChunks[j]; i++ {
 			n, err := r.Read(buffer)
 			if err != nil {
+				fileUploadProgress.Error(err)
 				return transferRate, err
 			}
 			chunk := bytes.NewReader(buffer[0:n])
@@ -471,7 +739,6 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 							}
 							nrBytesSent += transferRate
 							fileUploadProgress.AddBytes(transferRate)
-							uploadBytesCh <- fileUploadProgress
 						case <-cancel:
 							// Task cancellation requested
 							return
@@ -484,11 +751,11 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 			err = uploadChunk(client, request_url, api_key, values, filepath.Base(file.SourcePath), fake)
 			close(cancel)
 			if err != nil {
+				fileUploadProgress.Error(err)
 				return transferRate, err
 			}
 			duration := time.Since(start)
 			fileUploadProgress.AddBytes(int64(n) - nrBytesSent)
-			uploadBytesCh <- fileUploadProgress
 
 			// calculate the transfer rate
 			dur := int64(duration.Milliseconds())
@@ -502,8 +769,19 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 			}
 		}
 	}
+
+	match, err := verifyHash(file.SourcePath, uuid.String(), api_key, request_url)
+	if err != nil {
+		fileUploadProgress.Error(err)
+		return transferRate, err
+	}
+	if !match {
+		err := fmt.Errorf("hashes do not match for file %s", file.SourcePath)
+		fileUploadProgress.Error(err)
+		return transferRate, err
+	}
+
 	fileUploadProgress.Complete()
-	uploadBytesCh <- fileUploadProgress
 	return transferRate, nil
 }
 
@@ -619,7 +897,8 @@ func zipAndUpload(fileCh chan UploadFile, files_to_zip []UploadFile, temp_dir st
 		}
 		w.Close()
 		file.Close()
-		upload_file := UploadFile{SourcePath: zip_path, TargetPath: zip_filename, Delete: true, NrFiles: nrFilesInZip}
+		upload_file := UploadFile{SourcePath: zip_path, TargetPath: zip_filename, Delete: true}
+		upload_file.setSize()
 		fileCh <- upload_file
 	}
 
