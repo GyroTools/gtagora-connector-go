@@ -13,7 +13,6 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,22 +91,20 @@ type Datafile struct {
 }
 
 type ImportResult struct {
-	Datafiles          []Datafile `json:"datafiles"`
-	NrFiles            int
-	NrUploaded         int
-	NrUploadFailed     int
-	NrUploadHashFailed int
-	NrImported         int
-	NrExisted          int
-	NrIgnored          int
-	NrHashFailed       int
-	Files              []string
-	UploadFailed       []string
-	Imported           []string
-	Existed            []string
-	Ignored            []string
-	HashFailed         []string
-	UploadHashFailed   []string
+	Datafiles      []Datafile `json:"datafiles"`
+	NrFiles        int
+	NrUploaded     int
+	NrUploadFailed int
+	NrImported     int
+	NrExisted      int
+	NrIgnored      int
+	NrHashFailed   int
+	Files          []string
+	UploadFailed   []string
+	Imported       []string
+	Existed        []string
+	Ignored        []string
+	HashFailed     []string
 }
 
 type UploadFile struct {
@@ -405,14 +402,8 @@ func (importPackage *ImportPackage) Result() (*ImportResult, error) {
 		result.Files = append(result.Files, file.SourcePath)
 	}
 	for _, file := range importPackage.UploadFailed {
-		err := file.Err
-		if strings.Contains(err.Error(), "hashes do not match for file") {
-			result.NrUploadHashFailed += 1
-			result.UploadHashFailed = append(result.UploadHashFailed, file.SourcePath)
-		} else {
-			result.NrUploadFailed += 1
-			result.UploadFailed = append(result.UploadFailed, file.SourcePath)
-		}
+		result.NrUploadFailed += 1
+		result.UploadFailed = append(result.UploadFailed, file.SourcePath)
 	}
 	result.NrUploaded = result.NrFiles - result.NrUploadFailed
 
@@ -476,58 +467,58 @@ func (importPackage *ImportPackage) progress() (*ImportProgress, error) {
 	return &curProgress, nil
 }
 
-func verifyHash(curFile string, uid string, apiKey string, uploadUrl string) (bool, error) {
-	parsedURL, err := url.Parse(uploadUrl)
-	if err != nil {
-		return false, errors.New("error parsing URL: " + err.Error())
-	}
-	parsedURL.Path = fmt.Sprintf("/api/v1/flowfile/%s/", uid)
-	url := parsedURL.String()
-	client := agoraHttp.NewClient(url, apiKey, false)
+// func verifyHash(curFile string, uid string, apiKey string, uploadUrl string) (bool, error) {
+// 	parsedURL, err := url.Parse(uploadUrl)
+// 	if err != nil {
+// 		return false, errors.New("error parsing URL: " + err.Error())
+// 	}
+// 	parsedURL.Path = fmt.Sprintf("/api/v1/flowfile/%s/", uid)
+// 	url := parsedURL.String()
+// 	client := agoraHttp.NewClient(url, apiKey, false)
 
-	hashCheckSuccess := false
-	hashLocal, err := sha256Hash(curFile)
-	if err != nil {
-		return false, err
-	}
-	var hashServer string
+// 	hashCheckSuccess := false
+// 	hashLocal, err := sha256Hash(curFile)
+// 	if err != nil {
+// 		return false, err
+// 	}
+// 	var hashServer string
 
-	for hashServer == "" {
-		response, err := client.Get("", -1)
-		if err != nil {
-			return false, err
-		}
-		defer response.Body.Close()
+// 	for hashServer == "" {
+// 		response, err := client.Get("", -1)
+// 		if err != nil {
+// 			return false, err
+// 		}
+// 		defer response.Body.Close()
 
-		if response.StatusCode == http.StatusOK {
-			body, err := io.ReadAll(response.Body)
-			if err != nil {
-				return false, err
-			}
+// 		if response.StatusCode == http.StatusOK {
+// 			body, err := io.ReadAll(response.Body)
+// 			if err != nil {
+// 				return false, err
+// 			}
 
-			var data FlowFile
-			err = json.Unmarshal(body, &data)
-			if err != nil {
-				return false, err
-			}
+// 			var data FlowFile
+// 			err = json.Unmarshal(body, &data)
+// 			if err != nil {
+// 				return false, err
+// 			}
 
-			if data.State == 2 {
-				hashServer = data.ContentHash
-				if hashLocal != hashServer {
-					continue
-				} else {
-					hashCheckSuccess = true
-					break
-				}
-			} else if data.State == 3 || data.State == 5 {
-				return false, fmt.Errorf("failed to upload %v: there was an error joining the chunks", curFile)
-			}
-		} else {
-			return false, errors.New("failed to get the hash of the file from the server")
-		}
-	}
-	return hashCheckSuccess, nil
-}
+// 			if data.State == 2 {
+// 				hashServer = data.ContentHash
+// 				if hashLocal != hashServer {
+// 					continue
+// 				} else {
+// 					hashCheckSuccess = true
+// 					break
+// 				}
+// 			} else if data.State == 3 || data.State == 5 {
+// 				return false, fmt.Errorf("failed to upload %v: there was an error joining the chunks", curFile)
+// 			}
+// 		} else {
+// 			return false, errors.New("failed to get the hash of the file from the server")
+// 		}
+// 	}
+// 	return hashCheckSuccess, nil
+// }
 
 func (importPackage *ImportPackage) result() (*ImportResult, error) {
 	requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("%s%d/result", ImportPackageURL, importPackage.Id))
@@ -539,7 +530,7 @@ func (importPackage *ImportPackage) result() (*ImportResult, error) {
 	var result ImportResult
 	err = json.NewDecoder(resp.Body).Decode(&result)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("cannot get the upload results. Please update Agora to the newest version")
 	}
 	return &result, nil
 }
@@ -657,6 +648,12 @@ func sha256Hash(file string) (string, error) {
 	return hex.EncodeToString(hash[:]), nil
 }
 
+func sha256HashBytes(data []byte) string {
+	h := sha256.New()
+	h.Write(data)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func uploadWorker(fileChan chan UploadFile, uploadBytesCh chan UploadProgressTransferData, progressChan chan UploadProgress, request_url string, api_key string, fake bool, wg *sync.WaitGroup) {
 	// Decreasing internal counter for wait-group as soon as goroutine finishes
 	defer wg.Done()
@@ -692,7 +689,8 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 	uuid := uuid.New()
 	fileUploadProgress.TotalSize = totalSize
 
-	curChunkNr := 0
+	// chunk number starts at 1
+	curChunkNr := 1
 	for j, curFile := range files {
 		client := &http.Client{}
 		r, err := os.Open(curFile)
@@ -709,6 +707,8 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 			}
 			chunk := bytes.NewReader(buffer[0:n])
 
+			chunkHash := sha256HashBytes(buffer[0:n])
+
 			//prepare the reader instances to encode
 			values := map[string]io.Reader{
 				"file":                 chunk, // lets assume its this file
@@ -721,6 +721,7 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 				"flowFilename":         strings.NewReader(file.TargetPath),
 				"flowRelativePath":     strings.NewReader(file.TargetPath),
 				"flowTotalChunks":      strings.NewReader(fmt.Sprintf("%d", totalChunks)),
+				"flowChunkHash":        strings.NewReader(chunkHash),
 			}
 			curChunkNr += 1
 
@@ -770,16 +771,19 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 		}
 	}
 
-	match, err := verifyHash(file.SourcePath, uuid.String(), api_key, request_url)
-	if err != nil {
-		fileUploadProgress.Error(err)
-		return transferRate, err
-	}
-	if !match {
-		err := fmt.Errorf("hashes do not match for file %s", file.SourcePath)
-		fileUploadProgress.Error(err)
-		return transferRate, err
-	}
+	// for now remove the hash check since it needs to wait until all chunks have been joined and that might a while.
+	// Also we need to poss the result from the server which is not a good design. Ideally we should check a hash for each chunk
+	// but that needs a server modification
+	// match, err := verifyHash(file.SourcePath, uuid.String(), api_key, request_url)
+	// if err != nil {
+	// 	fileUploadProgress.Error(err)
+	// 	return transferRate, err
+	// }
+	// if !match {
+	// 	err := fmt.Errorf("hashes do not match for file %s", file.SourcePath)
+	// 	fileUploadProgress.Error(err)
+	// 	return transferRate, err
+	// }
 
 	fileUploadProgress.Complete()
 	return transferRate, nil
