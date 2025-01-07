@@ -155,19 +155,25 @@ type UploadProgressTransferData struct {
 func (progressData *UploadProgressTransferData) AddBytes(bytes int64) {
 	progressData.BytesTransfered += bytes
 	progressData.BytesIncrement = bytes
-	progressData.channel <- *progressData
+	if progressData.channel != nil {
+		progressData.channel <- *progressData
+	}
 }
 
 func (progressData *UploadProgressTransferData) Complete() {
 	progressData.BytesTransfered = progressData.TotalSize
 	progressData.BytesIncrement = 0
-	progressData.channel <- *progressData
+	if progressData.channel != nil {
+		progressData.channel <- *progressData
+	}
 }
 
 func (progressData *UploadProgressTransferData) Error(err error) {
 	progressData.File.Err = err
 	progressData.BytesIncrement = 0
-	progressData.channel <- *progressData
+	if progressData.channel != nil {
+		progressData.channel <- *progressData
+	}
 }
 
 func (f *UploadFile) setSize() error {
@@ -314,9 +320,32 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 func (importPackage *ImportPackage) Complete(targetFolderId int, jsonImportFile string, extractZipFile bool, wg *sync.WaitGroup) error {
 	path := fmt.Sprintf("/api/v1/import/%d/complete/", importPackage.Id)
 
+	// upload the json file is exists
+	if jsonImportFile != "" {
+		_, err := os.Stat(jsonImportFile)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("the json file \"%s\" does not exist", jsonImportFile)
+		} else if err != nil {
+			return err
+		}
+		requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("/api/v1/import/%d/upload/", importPackage.Id))
+		apiKey, err := importPackage.Client.GetApiKey()
+		if err != nil {
+			return err
+		}
+		file, err := NewUploadFile(jsonImportFile, nil)
+		if err != nil {
+			return err
+		}
+		_, err = uploadFile(nil, requestUrl, apiKey, file, false, 0)
+		if err != nil {
+			return err
+		}
+	}
+
 	data := map[string]string{}
 	if jsonImportFile != "" {
-		data["import_file"] = jsonImportFile
+		data["import_file"] = filepath.Base(jsonImportFile)
 	}
 	if targetFolderId > 0 {
 		data["folder"] = fmt.Sprintf("%d", targetFolderId)
