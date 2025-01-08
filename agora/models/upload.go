@@ -77,9 +77,17 @@ type FlowFile struct {
 	Updated             string        `json:"updated"`
 }
 
+type ImportTasks struct {
+	Count    int   `json:"count"`
+	Finished int   `json:"finished"`
+	Error    int   `json:"error"`
+	Ids      []int `json:"ids"`
+}
+
 type ImportProgress struct {
-	State    int `json:"state"`
-	Progress int `json:"progress"`
+	Tasks    ImportTasks `json:"tasks"`
+	State    int         `json:"state"`
+	Progress int         `json:"progress"`
 }
 
 type Datafile struct {
@@ -99,6 +107,7 @@ type ImportResult struct {
 	NrExisted      int
 	NrIgnored      int
 	NrHashFailed   int
+	Tasks          ImportTasks
 	Files          []string
 	UploadFailed   []string
 	Imported       []string
@@ -403,7 +412,7 @@ func (importPackage *ImportPackage) WaitForImport(timeout time.Duration, progres
 			if err != nil {
 				return err
 			}
-			if curProgress.State == STATE_FINISHED && curProgress.Progress == 100 {
+			if (curProgress.State == STATE_FINISHED || curProgress.State == STATE_ERROR) && curProgress.Progress == 100 {
 				progressChan <- UploadProgress{Type: TypeImportProgress, Data: 100}
 				importPackage.importFinished = true
 				return nil
@@ -417,14 +426,21 @@ func (importPackage *ImportPackage) WaitForImport(timeout time.Duration, progres
 
 func (importPackage *ImportPackage) Result() (*ImportResult, error) {
 	var result *ImportResult
+	var progress *ImportProgress
 	var err error
 	if importPackage.importFinished {
 		result, err = importPackage.result()
 		if err != nil {
 			return nil, err
 		}
+		progress, err = importPackage.progress()
+		if err != nil {
+			return nil, err
+		}
+		result.Tasks = progress.Tasks
 	} else {
 		result = &ImportResult{}
+		result.Tasks = ImportTasks{}
 	}
 	result.NrFiles = len(importPackage.Files)
 	for _, file := range importPackage.Files {
@@ -495,59 +511,6 @@ func (importPackage *ImportPackage) progress() (*ImportProgress, error) {
 	}
 	return &curProgress, nil
 }
-
-// func verifyHash(curFile string, uid string, apiKey string, uploadUrl string) (bool, error) {
-// 	parsedURL, err := url.Parse(uploadUrl)
-// 	if err != nil {
-// 		return false, errors.New("error parsing URL: " + err.Error())
-// 	}
-// 	parsedURL.Path = fmt.Sprintf("/api/v1/flowfile/%s/", uid)
-// 	url := parsedURL.String()
-// 	client := agoraHttp.NewClient(url, apiKey, false)
-
-// 	hashCheckSuccess := false
-// 	hashLocal, err := sha256Hash(curFile)
-// 	if err != nil {
-// 		return false, err
-// 	}
-// 	var hashServer string
-
-// 	for hashServer == "" {
-// 		response, err := client.Get("", -1)
-// 		if err != nil {
-// 			return false, err
-// 		}
-// 		defer response.Body.Close()
-
-// 		if response.StatusCode == http.StatusOK {
-// 			body, err := io.ReadAll(response.Body)
-// 			if err != nil {
-// 				return false, err
-// 			}
-
-// 			var data FlowFile
-// 			err = json.Unmarshal(body, &data)
-// 			if err != nil {
-// 				return false, err
-// 			}
-
-// 			if data.State == 2 {
-// 				hashServer = data.ContentHash
-// 				if hashLocal != hashServer {
-// 					continue
-// 				} else {
-// 					hashCheckSuccess = true
-// 					break
-// 				}
-// 			} else if data.State == 3 || data.State == 5 {
-// 				return false, fmt.Errorf("failed to upload %v: there was an error joining the chunks", curFile)
-// 			}
-// 		} else {
-// 			return false, errors.New("failed to get the hash of the file from the server")
-// 		}
-// 	}
-// 	return hashCheckSuccess, nil
-// }
 
 func (importPackage *ImportPackage) result() (*ImportResult, error) {
 	requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("%s%d/result", ImportPackageURL, importPackage.Id))
