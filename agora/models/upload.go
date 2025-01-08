@@ -27,6 +27,7 @@ const (
 	PARALLEL_UPLOADS        = 3
 	UPLOAD_CHUCK_SIZE       = 100 * 1024 * 1024
 	MAX_ZIP_SIZE            = 1024 * 1024 * 1024
+	MIN_ZIP_SIZE            = 20 * 1024 * 1024
 	FAKE_PROGRESS_THRESHOLD = 5 * 1024 * 1024
 	ZIPPED_UPLOAD_THRESHOLD = 5
 	STATE_UPLOADING         = 1
@@ -274,8 +275,8 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 	}
 
 	// Adding routines to workgroup and running then
-	fileCh := make(chan UploadFile)
-	uploadBytesCh := make(chan UploadProgressTransferData)
+	fileCh := make(chan UploadFile, parallel_uploads)
+	uploadBytesCh := make(chan UploadProgressTransferData, parallel_uploads)
 	wg := new(sync.WaitGroup)
 
 	go func() {
@@ -408,10 +409,10 @@ func (importPackage *ImportPackage) WaitForImport(timeout time.Duration, progres
 			return errors.New("import progress timeout")
 		case <-ticker.C:
 			curProgress, err := importPackage.progress()
-			progressChan <- UploadProgress{Type: TypeImportProgress, Data: curProgress.Progress}
 			if err != nil {
 				return err
 			}
+			progressChan <- UploadProgress{Type: TypeImportProgress, Data: curProgress.Progress}
 			if (curProgress.State == STATE_FINISHED || curProgress.State == STATE_ERROR) && curProgress.Progress == 100 {
 				progressChan <- UploadProgress{Type: TypeImportProgress, Data: 100}
 				importPackage.importFinished = true
@@ -885,9 +886,10 @@ func zipAndUpload(fileCh chan UploadFile, files_to_zip []UploadFile, temp_dir st
 
 			index += 1
 			nrFilesInZip += 1
-
 			fileInfo, err := os.Stat(zip_path)
-			if err == nil && fileInfo.Size() > MAX_ZIP_SIZE {
+			// we sent the zip file if it has exceeded its maximum size or
+			// if there are free upload slots and the zip file has reached its minimum size
+			if err == nil && (fileInfo.Size() > MAX_ZIP_SIZE || (fileInfo.Size() > MIN_ZIP_SIZE && len(fileCh) == 0)) {
 				break
 			}
 		}
