@@ -27,7 +27,7 @@ const (
 	PARALLEL_UPLOADS        = 3
 	UPLOAD_CHUCK_SIZE       = 100 * 1024 * 1024
 	MAX_ZIP_SIZE            = 1024 * 1024 * 1024
-	MIN_ZIP_SIZE            = 20 * 1024 * 1024
+	MIN_ZIP_SIZE            = 50 * 1024 * 1024
 	FAKE_PROGRESS_THRESHOLD = 5 * 1024 * 1024
 	ZIPPED_UPLOAD_THRESHOLD = 5
 	STATE_UPLOADING         = 1
@@ -140,7 +140,13 @@ const (
 	TypeMessage             ProgressType = "message"
 	TypeUploadError         ProgressType = "upload_error"
 	TypeImportProgress      ProgressType = "import_progress"
+	TypeResultProgress      ProgressType = "result_progress"
 )
+
+type ResultProgress struct {
+	NrFiles     int
+	NrProcessed int
+}
 
 type UploadProgress struct {
 	Type ProgressType
@@ -149,7 +155,6 @@ type UploadProgress struct {
 
 type UploadProgressInitData struct {
 	FilesToZip    int
-	ZipFiles      int
 	FilesToUpload int
 	TotalSize     int64
 }
@@ -249,7 +254,7 @@ func NewUploadFile(path string, attachments []string) (UploadFile, error) {
 
 func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan chan UploadProgress) error {
 	progressChan <- UploadProgress{Type: TypeUploadStarted, Data: importPackage.Id}
-	filesToUpload, filesToZip, nrZipFiles, err := analysePaths(inputFiles)
+	filesToUpload, filesToZip, err := analysePaths(inputFiles)
 	if err != nil {
 		return err
 	}
@@ -257,16 +262,16 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 	if len(filesToZip) < ZIPPED_UPLOAD_THRESHOLD {
 		filesToUpload = append(filesToUpload, filesToZip...)
 		filesToZip = []UploadFile{}
-		nrZipFiles = 0
 	}
 	totalSize := getTotalSize(filesToUpload, filesToZip)
-	progressChan <- UploadProgress{Type: TypeUploadInitialized, Data: UploadProgressInitData{FilesToZip: len(filesToZip), FilesToUpload: len(filesToUpload), TotalSize: totalSize, ZipFiles: nrZipFiles}}
+	zipFilesSize := getTotalSize([]UploadFile{}, filesToZip)
+	progressChan <- UploadProgress{Type: TypeUploadInitialized, Data: UploadProgressInitData{FilesToZip: len(filesToZip), FilesToUpload: len(filesToUpload), TotalSize: totalSize}}
 	uploadedSize := int64(0)
 
 	requestUrl := importPackage.Client.GetUrl(fmt.Sprintf("/api/v1/import/%d/upload/", importPackage.Id))
 
 	// we have 2 threadpools here. One performs the large file upload and the zipping in parallel. One performs a parallel file upload
-	parallel_uploads := PARALLEL_UPLOADS
+	parallelUploads := PARALLEL_UPLOADS
 	fake := false
 
 	apiKey, err := importPackage.Client.GetApiKey()
@@ -275,8 +280,8 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 	}
 
 	// Adding routines to workgroup and running then
-	fileCh := make(chan UploadFile, parallel_uploads)
-	uploadBytesCh := make(chan UploadProgressTransferData, parallel_uploads)
+	fileCh := make(chan UploadFile, parallelUploads)
+	uploadBytesCh := make(chan UploadProgressTransferData, parallelUploads)
 	wg := new(sync.WaitGroup)
 
 	go func() {
@@ -298,7 +303,7 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 		}
 	}()
 
-	for i := 0; i < parallel_uploads; i++ {
+	for i := 0; i < parallelUploads; i++ {
 		wg.Add(1)
 		go uploadWorker(fileCh, uploadBytesCh, progressChan, requestUrl, apiKey, fake, wg)
 	}
@@ -310,10 +315,26 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 	}
 
 	wg_upload_zip := new(sync.WaitGroup)
-	wg_upload_zip.Add(2)
-
+	wg_upload_zip.Add(1)
 	go uploadFiles(fileCh, filesToUpload, wg_upload_zip)
-	go zipAndUpload(fileCh, filesToZip, tempDir, wg_upload_zip)
+	if zipFilesSize > MAX_ZIP_SIZE {
+		// if there are a lot of files to zip then we split the zipping into 3 parts and process them in parallel
+		partSize := (len(filesToZip) + parallelUploads - 1) / parallelUploads
+		for i := 0; i < parallelUploads; i++ {
+			start := i * partSize
+			end := start + partSize
+			if end > len(filesToZip) {
+				end = len(filesToZip)
+			}
+			part := filesToZip[start:end]
+
+			wg_upload_zip.Add(1)
+			go zipAndUpload(fileCh, i, part, tempDir, wg_upload_zip)
+		}
+	} else {
+		wg_upload_zip.Add(1)
+		go zipAndUpload(fileCh, 0, filesToZip, tempDir, wg_upload_zip)
+	}
 	wg_upload_zip.Wait()
 
 	// Closing channel (waiting in goroutines won't continue any more)
@@ -410,11 +431,13 @@ func (importPackage *ImportPackage) WaitForImport(timeout time.Duration, progres
 		case <-ticker.C:
 			curProgress, err := importPackage.progress()
 			if err != nil {
+				if importPackage.Client.IsTimeoutError(err) {
+					continue
+				}
 				return err
 			}
-			progressChan <- UploadProgress{Type: TypeImportProgress, Data: curProgress.Progress}
+			progressChan <- UploadProgress{Type: TypeImportProgress, Data: *curProgress}
 			if (curProgress.State == STATE_FINISHED || curProgress.State == STATE_ERROR) && curProgress.Progress == 100 {
-				progressChan <- UploadProgress{Type: TypeImportProgress, Data: 100}
 				importPackage.importFinished = true
 				return nil
 			}
@@ -425,7 +448,7 @@ func (importPackage *ImportPackage) WaitForImport(timeout time.Duration, progres
 	}
 }
 
-func (importPackage *ImportPackage) Result() (*ImportResult, error) {
+func (importPackage *ImportPackage) Result(progressChan chan UploadProgress) (*ImportResult, error) {
 	var result *ImportResult
 	var progress *ImportProgress
 	var err error
@@ -454,36 +477,62 @@ func (importPackage *ImportPackage) Result() (*ImportResult, error) {
 	result.NrUploaded = result.NrFiles - result.NrUploadFailed
 
 	if result.Datafiles != nil {
-		for _, file := range importPackage.Files {
-			found := false
-			for _, datafile := range result.Datafiles {
-				if filepath.Clean(file.TargetPath) == filepath.Clean(datafile.Path) {
-					if datafile.Created {
-						hash, err := sha1Hash(file.SourcePath)
-						if err == nil {
-							if hash != datafile.Sha1 {
-								result.NrHashFailed += 1
-								result.HashFailed = append(result.HashFailed, file.SourcePath)
-							} else {
-								result.NrImported += 1
-								result.Imported = append(result.Imported, file.SourcePath)
-							}
+		// Preallocate slices with an estimated capacity
+		result.Files = make([]string, 0, len(importPackage.Files))
+		result.UploadFailed = make([]string, 0, len(importPackage.UploadFailed))
+		result.HashFailed = make([]string, 0, len(importPackage.Files)) // Assuming worst case all files could fail hash
+		result.Imported = make([]string, 0, len(importPackage.Files))   // Assuming worst case all files could be imported
+		result.Existed = make([]string, 0, len(importPackage.Files))    // Assuming worst case all files could exist
+		result.Ignored = make([]string, 0, len(importPackage.Files))    // Assuming worst case all files could be ignored
+
+		step := len(importPackage.Files) / 100
+
+		var resultProgress = ResultProgress{NrFiles: len(importPackage.Files), NrProcessed: 0}
+		if progressChan != nil {
+			progressChan <- UploadProgress{Type: TypeResultProgress, Data: resultProgress}
+		}
+		// Create a map from result.Datafiles for quick lookups
+		datafileMap := make(map[string]Datafile)
+		for _, datafile := range result.Datafiles {
+			datafileMap[filepath.Clean(datafile.Path)] = datafile
+		}
+
+		for i, file := range importPackage.Files {
+			cleanedTargetPath := filepath.Clean(file.TargetPath)
+			datafile, found := datafileMap[cleanedTargetPath]
+			if found {
+				delete(datafileMap, cleanedTargetPath) // Remove the element from the map
+				if datafile.Created {
+					hash, err := sha1Hash(file.SourcePath)
+					if err == nil {
+						if hash != datafile.Sha1 {
+							result.NrHashFailed += 1
+							result.HashFailed = append(result.HashFailed, file.SourcePath)
 						} else {
 							result.NrImported += 1
 							result.Imported = append(result.Imported, file.SourcePath)
 						}
 					} else {
-						result.NrExisted += 1
-						result.Existed = append(result.Existed, file.SourcePath)
+						result.NrImported += 1
+						result.Imported = append(result.Imported, file.SourcePath)
 					}
-					found = true
-					break
+				} else {
+					result.NrExisted += 1
+					result.Existed = append(result.Existed, file.SourcePath)
 				}
-			}
-			if !found {
+			} else {
 				result.NrIgnored += 1
 				result.Ignored = append(result.Ignored, file.SourcePath)
 			}
+			if progressChan != nil {
+				resultProgress.NrProcessed += 1
+				if i%step == 0 {
+					progressChan <- UploadProgress{Type: TypeResultProgress, Data: resultProgress}
+				}
+			}
+		}
+		if progressChan != nil {
+			progressChan <- UploadProgress{Type: TypeResultProgress, Data: resultProgress}
 		}
 	}
 	return result, nil
@@ -557,7 +606,7 @@ func (importPackage *ImportPackage) wait(timeout time.Duration, wg *sync.WaitGro
 	}
 }
 
-func analysePaths(files []UploadFile) ([]UploadFile, []UploadFile, int, error) {
+func analysePaths(files []UploadFile) ([]UploadFile, []UploadFile, error) {
 	var filesToUpload []UploadFile
 	var filesToZip []UploadFile
 	sizeZippedFiles := int64(0)
@@ -591,8 +640,7 @@ func analysePaths(files []UploadFile) ([]UploadFile, []UploadFile, int, error) {
 			}
 		}
 	}
-	nrZipFiles := sizeZippedFiles/int64(MAX_ZIP_SIZE) + 1
-	return filesToUpload, filesToZip, int(nrZipFiles), nil
+	return filesToUpload, filesToZip, nil
 }
 
 func getTotalSize(filesToUpload []UploadFile, filesToZip []UploadFile) int64 {
@@ -849,12 +897,12 @@ func uploadFiles(fileCh chan UploadFile, files_to_upload []UploadFile, wg *sync.
 	return nil
 }
 
-func zipAndUpload(fileCh chan UploadFile, files_to_zip []UploadFile, temp_dir string, wg *sync.WaitGroup) error {
+func zipAndUpload(fileCh chan UploadFile, threadId int, files_to_zip []UploadFile, temp_dir string, wg *sync.WaitGroup) error {
 	defer wg.Done()
 
 	index := 0
 	for index < len(files_to_zip) {
-		zip_filename := fmt.Sprintf("upload_%d.agora_upload", index)
+		zip_filename := fmt.Sprintf("upload_%d_%d.agora_upload", threadId, index)
 		zip_path := filepath.Join(temp_dir, zip_filename)
 		file, err := os.Create(zip_path)
 		if err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -106,6 +107,13 @@ func (client *Client) PostAndParse(path string, body io.Reader, target interface
 	}
 	defer resp.Body.Close()
 	return client.parseResponse(resp, target, path)
+}
+
+func (client *Client) IsTimeoutError(err error) bool {
+	if err, ok := err.(net.Error); ok && err.Timeout() {
+		return true
+	}
+	return false
 }
 
 func (client *Client) parseResponse(resp *http.Response, target interface{}, path string) error {
