@@ -284,7 +284,10 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 	uploadBytesCh := make(chan UploadProgressTransferData, parallelUploads)
 	wg := new(sync.WaitGroup)
 
+	progressWg := new(sync.WaitGroup)
+	progressWg.Add(1)
 	go func() {
+		defer progressWg.Done()
 		for prog := range uploadBytesCh {
 			if prog.File.Err != nil {
 				importPackage.UploadFailed = append(importPackage.UploadFailed, prog.File)
@@ -348,6 +351,7 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 
 	// close progress channel
 	close(uploadBytesCh)
+	progressWg.Wait()
 	return nil
 }
 
@@ -742,11 +746,11 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 			fileUploadProgress.Error(err)
 			return transferRate, err
 		}
-		defer r.Close()
 		for i := 0; i < nrChunks[j]; i++ {
 			n, err := r.Read(buffer)
 			if err != nil {
 				fileUploadProgress.Error(err)
+				r.Close()
 				return transferRate, err
 			}
 			chunk := bytes.NewReader(buffer[0:n])
@@ -797,6 +801,7 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 			close(cancel)
 			if err != nil {
 				fileUploadProgress.Error(err)
+				r.Close()
 				return transferRate, err
 			}
 			duration := time.Since(start)
@@ -813,6 +818,7 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 				}
 			}
 		}
+		r.Close()
 	}
 
 	// for now remove the hash check since it needs to wait until all chunks have been joined and that might a while.
@@ -907,13 +913,13 @@ func zipAndUpload(fileCh chan UploadFile, threadId int, files_to_zip []UploadFil
 	for index < len(files_to_zip) {
 		zip_filename := fmt.Sprintf("upload_%d_%d.agora_upload", threadId, index)
 		zip_path := filepath.Join(temp_dir, zip_filename)
-		file, err := os.Create(zip_path)
+		zipfile, err := os.Create(zip_path)
 		if err != nil {
 			return err
 		}
 		nrFilesInZip := 0
 
-		w := zip.NewWriter(file)
+		w := zip.NewWriter(zipfile)
 		for _, file_to_zip := range files_to_zip[index:] {
 			file, err := os.Open(file_to_zip.SourcePath)
 			if err != nil {
@@ -927,13 +933,16 @@ func zipAndUpload(fileCh chan UploadFile, threadId int, files_to_zip []UploadFil
 			}
 			f, err := w.CreateHeader(header)
 			if err != nil {
+				file.Close()
 				return err
 			}
 
 			_, err = io.Copy(f, file)
 			if err != nil {
+				file.Close()
 				return err
 			}
+			file.Close()
 
 			index += 1
 			nrFilesInZip += 1
@@ -945,7 +954,7 @@ func zipAndUpload(fileCh chan UploadFile, threadId int, files_to_zip []UploadFil
 			}
 		}
 		w.Close()
-		file.Close()
+		zipfile.Close()
 		upload_file := UploadFile{SourcePath: zip_path, TargetPath: zip_filename, Delete: true}
 		upload_file.setSize()
 		fileCh <- upload_file
