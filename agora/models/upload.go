@@ -339,6 +339,7 @@ func (importPackage *ImportPackage) Upload(inputFiles []UploadFile, progressChan
 
 	// Closing channel (waiting in goroutines won't continue any more)
 	close(fileCh)
+	close(uploadBytesCh)
 
 	// Waiting for all goroutines to finish (otherwise they die as main routine dies)
 	wg.Wait()
