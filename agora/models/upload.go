@@ -719,107 +719,142 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 	if file.Delete {
 		defer os.Remove(file.SourcePath)
 	}
-	files := append([]string{file.SourcePath}, file.Attachments...)
+	mainFile := file.SourcePath
+	attachmentSize := int64(0)
 	totalSize := int64(0)
-	totalChunks := 0
-	var nrChunks []int
-	for _, curFile := range files {
-		fileInfo, err := os.Stat(curFile)
+
+	fileInfo, err := os.Stat(mainFile)
+	if err != nil {
+		fileUploadProgress.Error(err)
+		return transferRate, err
+	}
+	totalSize = fileInfo.Size()
+
+	// Validate attachments and add their sizes
+	for _, attachment := range file.Attachments {
+		attachInfo, err := os.Stat(attachment)
 		if err != nil {
 			fileUploadProgress.Error(err)
 			return transferRate, err
 		}
-		totalSize += fileInfo.Size()
-		curNrChunks := int(math.Ceil(float64(fileInfo.Size()) / float64(UPLOAD_CHUCK_SIZE)))
-		nrChunks = append(nrChunks, curNrChunks)
-		totalChunks += curNrChunks
+		totalSize += attachInfo.Size()
+		attachmentSize += attachInfo.Size()
 	}
+
+	totalChunks := int(math.Ceil(float64(fileInfo.Size()) / float64(UPLOAD_CHUCK_SIZE)))
+
 	uuid := uuid.New()
 	fileUploadProgress.TotalSize = totalSize
 
 	// chunk number starts at 1
 	curChunkNr := 1
-	for j, curFile := range files {
-		client := &http.Client{}
-		r, err := os.Open(curFile)
+
+	client := &http.Client{}
+	r, err := os.Open(mainFile)
+	if err != nil {
+		fileUploadProgress.Error(err)
+		return transferRate, err
+	}
+	for i := 0; i < totalChunks; i++ {
+		n, err := r.Read(buffer)
 		if err != nil {
 			fileUploadProgress.Error(err)
+			r.Close()
 			return transferRate, err
 		}
-		for i := 0; i < nrChunks[j]; i++ {
-			n, err := r.Read(buffer)
-			if err != nil {
-				fileUploadProgress.Error(err)
-				r.Close()
-				return transferRate, err
+
+		if i == totalChunks-1 && len(file.Attachments) > 0 {
+			lastBuffer := make([]byte, 0, int64(n)+attachmentSize)
+			lastBuffer = append(lastBuffer, buffer[0:n]...)
+
+			// Append all attachments to the last chunk
+			for _, attachment := range file.Attachments {
+				attachFile, err := os.Open(attachment)
+				if err != nil {
+					fileUploadProgress.Error(err)
+					r.Close()
+					return transferRate, err
+				}
+
+				attachData, err := io.ReadAll(attachFile)
+				attachFile.Close()
+				if err != nil {
+					fileUploadProgress.Error(err)
+					r.Close()
+					return transferRate, err
+				}
+
+				lastBuffer = append(lastBuffer, attachData...)
 			}
-			chunk := bytes.NewReader(buffer[0:n])
+			buffer = lastBuffer
+			n = len(buffer)
+		}
+		chunk := bytes.NewReader(buffer[0:n])
 
-			chunkHash := sha256HashBytes(buffer[0:n])
+		chunkHash := sha256HashBytes(buffer[0:n])
 
-			//prepare the reader instances to encode
-			values := map[string]io.Reader{
-				"file":                 chunk, // lets assume its this file
-				"description":          strings.NewReader(""),
-				"flowChunkNumber":      strings.NewReader(fmt.Sprintf("%d", curChunkNr)),
-				"flowChunkSize":        strings.NewReader(fmt.Sprintf("%d", UPLOAD_CHUCK_SIZE)),
-				"flowCurrentChunkSize": strings.NewReader(fmt.Sprintf("%d", n)),
-				"flowTotalSize":        strings.NewReader(fmt.Sprintf("%d", totalSize)),
-				"flowIdentifier":       strings.NewReader(uuid.String()),
-				"flowFilename":         strings.NewReader(file.TargetPath),
-				"flowRelativePath":     strings.NewReader(file.TargetPath),
-				"flowTotalChunks":      strings.NewReader(fmt.Sprintf("%d", totalChunks)),
-				"flowChunkHash":        strings.NewReader(chunkHash),
-			}
-			curChunkNr += 1
+		//prepare the reader instances to encode
+		values := map[string]io.Reader{
+			"file":                 chunk, // lets assume its this file
+			"description":          strings.NewReader(""),
+			"flowChunkNumber":      strings.NewReader(fmt.Sprintf("%d", curChunkNr)),
+			"flowChunkSize":        strings.NewReader(fmt.Sprintf("%d", UPLOAD_CHUCK_SIZE)),
+			"flowCurrentChunkSize": strings.NewReader(fmt.Sprintf("%d", n)),
+			"flowTotalSize":        strings.NewReader(fmt.Sprintf("%d", totalSize)),
+			"flowIdentifier":       strings.NewReader(uuid.String()),
+			"flowFilename":         strings.NewReader(file.TargetPath),
+			"flowRelativePath":     strings.NewReader(file.TargetPath),
+			"flowTotalChunks":      strings.NewReader(fmt.Sprintf("%d", totalChunks)),
+			"flowChunkHash":        strings.NewReader(chunkHash),
+		}
+		curChunkNr += 1
 
-			// this goroutine sends continious (fake) progress updates since we cannot track the real number of sent bytes
-			cancel := make(chan struct{})
-			nrBytesSent := int64(0)
-			if n > FAKE_PROGRESS_THRESHOLD {
-				go func() {
-					ticker := time.NewTicker(time.Second)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-ticker.C:
-							if nrBytesSent+transferRate >= int64(n) {
-								return
-							}
-							nrBytesSent += transferRate
-							fileUploadProgress.AddBytes(transferRate)
-						case <-cancel:
-							// Task cancellation requested
+		// this goroutine sends continious (fake) progress updates since we cannot track the real number of sent bytes
+		cancel := make(chan struct{})
+		nrBytesSent := int64(0)
+		if n > FAKE_PROGRESS_THRESHOLD {
+			go func() {
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						if nrBytesSent+transferRate >= int64(n) {
 							return
 						}
+						nrBytesSent += transferRate
+						fileUploadProgress.AddBytes(transferRate)
+					case <-cancel:
+						// Task cancellation requested
+						return
 					}
-				}()
-			}
-
-			start := time.Now()
-			err = uploadChunk(client, request_url, api_key, values, filepath.Base(file.SourcePath), fake)
-			close(cancel)
-			if err != nil {
-				fileUploadProgress.Error(err)
-				r.Close()
-				return transferRate, err
-			}
-			duration := time.Since(start)
-			fileUploadProgress.AddBytes(int64(n) - nrBytesSent)
-
-			// calculate the transfer rate
-			dur := int64(duration.Milliseconds())
-			if n > FAKE_PROGRESS_THRESHOLD && dur > 0 {
-				curTransferRate := 1000 * int64(n) / dur
-				if i == 0 {
-					transferRate = curTransferRate
-				} else {
-					transferRate = (curTransferRate + transferRate) / 2
 				}
+			}()
+		}
+
+		start := time.Now()
+		err = uploadChunk(client, request_url, api_key, values, filepath.Base(file.SourcePath), fake)
+		close(cancel)
+		if err != nil {
+			fileUploadProgress.Error(err)
+			r.Close()
+			return transferRate, err
+		}
+		duration := time.Since(start)
+		fileUploadProgress.AddBytes(int64(n) - nrBytesSent)
+
+		// calculate the transfer rate
+		dur := int64(duration.Milliseconds())
+		if n > FAKE_PROGRESS_THRESHOLD && dur > 0 {
+			curTransferRate := 1000 * int64(n) / dur
+			if i == 0 {
+				transferRate = curTransferRate
+			} else {
+				transferRate = (curTransferRate + transferRate) / 2
 			}
 		}
-		r.Close()
 	}
+	r.Close()
 
 	// for now remove the hash check since it needs to wait until all chunks have been joined and that might a while.
 	// Also we need to poss the result from the server which is not a good design. Ideally we should check a hash for each chunk
