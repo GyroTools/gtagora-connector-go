@@ -164,6 +164,7 @@ type UploadProgressTransferData struct {
 	TotalSize       int64
 	BytesTransfered int64
 	BytesIncrement  int64
+	TransferRate    int64
 	channel         chan UploadProgressTransferData
 }
 
@@ -175,9 +176,10 @@ func (progressData *UploadProgressTransferData) AddBytes(bytes int64) {
 	}
 }
 
-func (progressData *UploadProgressTransferData) Complete() {
+func (progressData *UploadProgressTransferData) Complete(transferRate int64) {
 	progressData.BytesTransfered = progressData.TotalSize
 	progressData.BytesIncrement = 0
+	progressData.TransferRate = transferRate
 	if progressData.channel != nil {
 		progressData.channel <- *progressData
 	}
@@ -870,7 +872,7 @@ func uploadFile(uploadBytesCh chan UploadProgressTransferData, request_url strin
 	// 	return transferRate, err
 	// }
 
-	fileUploadProgress.Complete()
+	fileUploadProgress.Complete(transferRate)
 	return transferRate, nil
 }
 
