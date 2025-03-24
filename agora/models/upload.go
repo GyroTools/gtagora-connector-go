@@ -495,6 +495,9 @@ func (importPackage *ImportPackage) Result(progressChan chan UploadProgress) (*I
 		result.Ignored = make([]string, 0, len(importPackage.Files))    // Assuming worst case all files could be ignored
 
 		step := len(importPackage.Files) / 100
+		if step == 0 {
+			step = 1
+		}
 
 		var resultProgress = ResultProgress{NrFiles: len(importPackage.Files), NrProcessed: 0}
 		if progressChan != nil {
