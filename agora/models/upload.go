@@ -23,9 +23,10 @@ import (
 	"github.com/google/uuid"
 )
 
+var UPLOAD_CHUCK_SIZE int64 = 100 * 1024 * 1024 // 100 MB
+
 const (
 	PARALLEL_UPLOADS        = 3
-	UPLOAD_CHUCK_SIZE       = 100 * 1024 * 1024
 	MAX_ZIP_SIZE            = 1024 * 1024 * 1024
 	MIN_ZIP_SIZE            = 50 * 1024 * 1024
 	FAKE_PROGRESS_THRESHOLD = 5 * 1024 * 1024
@@ -548,6 +549,12 @@ func (importPackage *ImportPackage) Result(progressChan chan UploadProgress) (*I
 		}
 	}
 	return result, nil
+}
+
+func (importPackage *ImportPackage) SetUploadChunkSize(siz int64) {
+	if siz > 0 {
+		UPLOAD_CHUCK_SIZE = siz
+	}
 }
 
 func (importPackage *ImportPackage) update() error {
