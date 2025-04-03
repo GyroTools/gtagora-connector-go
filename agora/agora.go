@@ -55,6 +55,26 @@ func (a *Agora) GetProject(id int) (*models.Project, error) {
 	return &project, nil
 }
 
+func (a *Agora) GetStudy(id int) (*models.Study, error) {
+	var study models.Study
+
+	err := a.Client.GetAndParse(fmt.Sprintf("%s%d/", models.StudyURL, id), &study)
+	if err != nil {
+		return nil, err
+	}
+	return &study, nil
+}
+
+func (a *Agora) GetPatient(id int) (*models.Patient, error) {
+	var patient models.Patient
+
+	err := a.Client.GetAndParse(fmt.Sprintf("%s%d/", models.PatientURL, id), &patient)
+	if err != nil {
+		return nil, err
+	}
+	return &patient, nil
+}
+
 func (a *Agora) GetFolder(id int) (*models.Folder, error) {
 	var folder models.Folder
 

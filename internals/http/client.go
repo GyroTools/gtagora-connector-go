@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -40,8 +39,8 @@ func NewPasswordClient(url string, username string, password string, verifyCert 
 	return &Client{conn: &connection}
 }
 
-func (client *Client) SetDefaultTimeout(timeoutSec time.Duration) {
-	client.defaultTimeout = timeoutSec
+func (client *Client) SetDefaultTimeout(timeout time.Duration) {
+	client.defaultTimeout = timeout
 }
 
 func (client *Client) Ping() error {
@@ -49,7 +48,7 @@ func (client *Client) Ping() error {
 	if err != nil {
 		return err
 	} else if resp.StatusCode != 200 {
-		return errors.New(fmt.Sprintf("status code = %d", resp.StatusCode))
+		return fmt.Errorf("status code = %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -59,7 +58,7 @@ func (client *Client) CheckConnection() error {
 	if err != nil {
 		return err
 	} else if resp.StatusCode != 200 {
-		return errors.New(fmt.Sprintf("status code = %d", resp.StatusCode))
+		return fmt.Errorf("status code = %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -81,7 +80,7 @@ func (client *Client) GetApiKey() (string, error) {
 		if resp.StatusCode == 404 {
 			return "", errors.New("no api-key found. please create an api-key in your Agora user profile")
 		} else if resp.StatusCode > 299 {
-			return "", errors.New(fmt.Sprintf("status code = %d", resp.StatusCode))
+			return "", fmt.Errorf("status code = %d", resp.StatusCode)
 		}
 
 		target := new(ApiKeyResponse)
@@ -118,17 +117,33 @@ func (client *Client) IsTimeoutError(err error) bool {
 
 func (client *Client) parseResponse(resp *http.Response, target interface{}, path string) error {
 	if resp.StatusCode >= 400 {
-		return errors.New(fmt.Sprintf("status code = %d", resp.StatusCode))
+		return fmt.Errorf("status code = %d", resp.StatusCode)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
 
-	err = json.Unmarshal(body, &target)
-	if err != nil {
-		return err
+	// try to detect paged responses by checking for a "results" key
+	var generic map[string]json.RawMessage
+	if err := json.Unmarshal(body, &generic); err == nil {
+		if results, ok := generic["results"]; ok {
+			err = json.Unmarshal(results, target)
+			if err != nil {
+				return err
+			}
+		} else {
+			err = json.Unmarshal(body, target)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		err = json.Unmarshal(body, target)
+		if err != nil {
+			return err
+		}
 	}
 
 	targetType := reflect.TypeOf(target)

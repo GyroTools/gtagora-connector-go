@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/GyroTools/gtagora-connector-go/internals/http"
@@ -29,4 +30,26 @@ type Membership struct {
 	Role    int `json:"role"`
 	ID      int `json:"id"`
 	Project int `json:"project"`
+}
+
+func (project *Project) GetStudies() ([]Study, error) {
+	var studies []Study
+
+	url := fmt.Sprintf("%sexam/?limit=10000000000", project.URL)
+	err := project.Client.GetAndParse(url, &studies)
+	if err != nil {
+		return nil, err
+	}
+	return studies, nil
+}
+
+func (project *Project) GetPatients() ([]Patient, error) {
+	var patients []Patient
+
+	url := fmt.Sprintf("%spatient/?limit=10000000000", project.URL)
+	err := project.Client.GetAndParse(url, &patients)
+	if err != nil {
+		return nil, err
+	}
+	return patients, nil
 }
