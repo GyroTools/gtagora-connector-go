@@ -60,6 +60,7 @@ type ImportPackage struct {
 	Files            []UploadFile
 	UploadFailed     []UploadFile
 	importFinished   bool
+	timeout          time.Duration
 
 	agoraHttp.BaseModel
 }
@@ -418,14 +419,15 @@ func (importPackage *ImportPackage) Complete(targetFolderId int, jsonImportFile 
 
 	if wg != nil {
 		// wait for completion
-		timeout := time.Duration(1) * time.Hour
-		go importPackage.wait(timeout, wg)
+		go importPackage.wait(importPackage.timeout, wg)
 	}
 
 	return nil
 }
 
-func (importPackage *ImportPackage) WaitForImport(timeout time.Duration, progressChan chan UploadProgress) error {
+func (importPackage *ImportPackage) WaitForImport(progressChan chan UploadProgress) error {
+	timeout := importPackage.timeout
+
 	if importPackage.State == STATE_ERROR {
 		return nil
 	}
@@ -446,7 +448,9 @@ func (importPackage *ImportPackage) WaitForImport(timeout time.Duration, progres
 				}
 				return err
 			}
-			progressChan <- UploadProgress{Type: TypeImportProgress, Data: *curProgress}
+			if progressChan != nil {
+				progressChan <- UploadProgress{Type: TypeImportProgress, Data: *curProgress}
+			}
 			if (curProgress.State == STATE_FINISHED || curProgress.State == STATE_ERROR) && curProgress.Progress == 100 {
 				importPackage.importFinished = true
 				return nil
@@ -555,6 +559,10 @@ func (importPackage *ImportPackage) SetUploadChunkSize(siz int64) {
 	if siz > 0 {
 		UPLOAD_CHUCK_SIZE = siz
 	}
+}
+
+func (importPackage *ImportPackage) SetTimeout(timeout time.Duration) {
+	importPackage.timeout = timeout
 }
 
 func (importPackage *ImportPackage) update() error {

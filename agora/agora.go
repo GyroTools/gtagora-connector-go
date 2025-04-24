@@ -102,6 +102,7 @@ func (a *Agora) NewImportPackage() (*models.ImportPackage, error) {
 	if err != nil {
 		return nil, err
 	}
+	importPackage.SetTimeout(time.Duration(1) * time.Hour)
 	return &importPackage, nil
 }
 

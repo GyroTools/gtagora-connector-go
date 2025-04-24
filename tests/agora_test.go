@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GyroTools/gtagora-connector-go/agora"
+	"github.com/GyroTools/gtagora-connector-go/agora/models"
 	"github.com/GyroTools/gtagora-connector-go/internals/http"
 	"gotest.tools/v3/assert"
 )
@@ -390,69 +392,93 @@ func TestFolderItem(t *testing.T) {
 	}
 }
 
-// func TestUpload(t *testing.T) {
-// 	tempDir, err := createTempDirectory()
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	defer os.RemoveAll(tempDir)
+func TestUpload(t *testing.T) {
+	tempDir, err := createTempDirectory()
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(tempDir)
 
-// 	apiKey := os.Getenv("AGORA_API_KEY")
-// 	if len(apiKey) == 0 {
-// 		t.Errorf("did not find an api key in the environment variable AGORA_API_KEY")
-// 		return
-// 	}
+	apiKey := os.Getenv("AGORA_API_KEY")
+	if len(apiKey) == 0 {
+		t.Errorf("did not find an api key in the environment variable AGORA_API_KEY")
+		return
+	}
 
-// 	url := server
-// 	agora, err := agora.Create(url, apiKey, false)
-// 	if err != nil {
-// 		t.Errorf("could not connect to Agora: %s", err.Error())
-// 		return
-// 	}
+	url := server
+	agora, err := agora.Create(url, apiKey, false)
+	if err != nil {
+		t.Errorf("could not connect to Agora: %s", err.Error())
+		return
+	}
 
-// 	importPackage, err := agora.NewImportPackage()
-// 	if err != nil {
-// 		t.Errorf("cannot get the import package: %s", err.Error())
-// 	} else if importPackage == nil {
-// 		t.Errorf("import package is empty")
-// 		return
-// 	}
+	importPackage, err := agora.NewImportPackage()
+	if err != nil {
+		t.Errorf("cannot get the import package: %s", err.Error())
+	} else if importPackage == nil {
+		t.Errorf("import package is empty")
+		return
+	}
 
-// 	progressChan := make(chan int)
-// 	defer close(progressChan)
-// 	go func() {
-// 		// this function receives the progress from the agora interface and passes it on to the gtPacknGo progress struct
-// 		chunksUploaded := 0
-// 		for progress := range progressChan {
-// 			chunksUploaded += 1
-// 			fmt.Printf("Upload Progress: %d\n", progress)
-// 		}
-// 	}()
+	progressChan := make(chan models.UploadProgress)
+	defer close(progressChan)
+	go func() {
+		// this function receives the progress from the agora interface and passes it on to the gtPacknGo progress struct
+		chunksUploaded := 0
+		for progress := range progressChan {
+			if progress.Type == models.TypeProgressPct {
+				if progressPct, ok := progress.Data.(int); ok {
+					chunksUploaded += 1
+					fmt.Printf("Upload Progress: %v\n", progressPct)
+				}
+			}
+		}
+	}()
 
-// 	var files []models.UploadFile
-// 	for i := 0; i < 15; i++ {
-// 		uploadFile := models.NewUploadFile(filepath.Join(tempDir, fmt.Sprintf("file%02d.txt", i)), nil)
-// 		files = append(files, uploadFile)
-// 	}
-// 	largeUploadFile := models.NewUploadFile(filepath.Join(tempDir, "file_large.txt"), nil)
-// 	files = append(files, largeUploadFile)
+	var files []models.UploadFile
+	for i := 0; i < 15; i++ {
+		uploadFile, err := models.NewUploadFile(filepath.Join(tempDir, fmt.Sprintf("file%02d.txt", i)), nil)
+		if err != nil {
+			t.Errorf("cannot create upload file")
+			return
+		}
+		files = append(files, uploadFile)
+	}
+	largeUploadFile, err := models.NewUploadFile(filepath.Join(tempDir, "file_large.txt"), nil)
+	if err != nil {
+		t.Errorf("cannot create upload file")
+		return
+	}
+	files = append(files, largeUploadFile)
 
-// 	group1 := models.NewUploadFile(filepath.Join(tempDir, "file15.txt"), []string{filepath.Join(tempDir, "file16.txt")})
-// 	group2 := models.NewUploadFile(filepath.Join(tempDir, "file17.txt"), []string{filepath.Join(tempDir, "file18.txt"), filepath.Join(tempDir, "file19.txt")})
-// 	files = append(files, group1)
-// 	files = append(files, group2)
-// 	err = importPackage.Upload(files, progressChan)
-// 	if err != nil {
-// 		t.Errorf("cannot upload files: %s", err.Error())
-// 		return
-// 	}
+	group1, err := models.NewUploadFile(filepath.Join(tempDir, "file15.txt"), []string{filepath.Join(tempDir, "file16.txt")})
+	if err != nil {
+		t.Errorf("cannot create upload file")
+		return
+	}
+	group2, err := models.NewUploadFile(filepath.Join(tempDir, "file17.txt"), []string{filepath.Join(tempDir, "file18.txt"), filepath.Join(tempDir, "file19.txt")})
+	if err != nil {
+		t.Errorf("cannot create upload file")
+		return
+	}
+	files = append(files, group1)
+	files = append(files, group2)
+	err = importPackage.Upload(files, progressChan)
+	if err != nil {
+		t.Errorf("cannot upload files: %s", err.Error())
+		return
+	}
 
-// 	var wg sync.WaitGroup
-// 	wg.Add(1)
-// 	err = importPackage.Complete(123, "", false, &wg)
-// 	if err != nil {
-// 		t.Errorf("cannot send the complete request: %s", err.Error())
-// 		return
-// 	}
-// 	wg.Wait()
-// }
+	var wg sync.WaitGroup
+	wg.Add(1)
+	err = importPackage.Complete(303, "", false, &wg)
+	if err != nil {
+		t.Errorf("cannot send the complete request: %s", err.Error())
+		return
+	}
+	err = importPackage.WaitForImport(nil)
+	if err != nil {
+		t.Errorf("error during wait: %s", err.Error())
+	}
+	wg.Wait()
+}
