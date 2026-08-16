@@ -410,6 +410,7 @@ func (importPackage *ImportPackage) Complete(targetFolderId int, jsonImportFile 
 		}
 		return err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != 204 {
 		if wg != nil {
 			defer wg.Done()
@@ -941,6 +942,10 @@ func uploadChunk(client *http.Client, url string, api_key string, values map[str
 		if err2 != nil {
 			return err2
 		}
+		// drain and close the body so the underlying connection can be reused/released;
+		// leaving it open leaks a socket + readLoop/writeLoop goroutine per chunk
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
 		// Check the response
 		if res.StatusCode != http.StatusOK {
 			err2 = fmt.Errorf("bad status: %s", res.Status)
