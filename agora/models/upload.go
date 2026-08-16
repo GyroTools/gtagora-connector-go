@@ -132,17 +132,17 @@ type UploadFile struct {
 type ProgressType string
 
 const (
-	TypeUploadInitialized   ProgressType = "upload_initialized"
-	TypeUploadStarted       ProgressType = "upload_started"
-	TypeUploadCompleted     ProgressType = "upload_completed"
-	TypeFileUploadStarted   ProgressType = "file_upload_started"
-	TypeFileUploadCompleted ProgressType = "file_upload_completed"
-	TypeFileProgress        ProgressType = "file_progress"
-	TypeProgressPct         ProgressType = "progress"
-	TypeMessage             ProgressType = "message"
-	TypeUploadError         ProgressType = "upload_error"
-	TypeImportProgress      ProgressType = "import_progress"
-	TypeResultProgress      ProgressType = "result_progress"
+	TypeUploadInitialized   ProgressType = "upload_initialized"    // data: UploadProgressInitData
+	TypeUploadStarted       ProgressType = "upload_started"        // data: int (importPackage.Id)
+	TypeUploadCompleted     ProgressType = "upload_completed"      // data: int (importPackage.Id)
+	TypeFileUploadStarted   ProgressType = "file_upload_started"   // data: UploadFile
+	TypeFileUploadCompleted ProgressType = "file_upload_completed" // data: UploadFile
+	TypeFileProgress        ProgressType = "file_progress"         // data: UploadProgressTransferData
+	TypeProgressPct         ProgressType = "progress"              // data: int (percentage)
+	TypeMessage             ProgressType = "message"               // data: string
+	TypeUploadError         ProgressType = "upload_error"          // data: UploadFile
+	TypeImportProgress      ProgressType = "import_progress"       // data: ImportProgress
+	TypeResultProgress      ProgressType = "result_progress"       // data: ResultProgress
 )
 
 type ResultProgress struct {
