@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/GyroTools/gtagora-connector-go/internals/http"
@@ -29,19 +30,22 @@ type Datafile struct {
 }
 
 // Download downloads the datafile into destDir/OriginalFilename.
-// If a file with the same size and sha1 already exists there, the download is
-// skipped and skipped=true is returned. The file is streamed into a temporary
-// ".part" file and atomically renamed on success, so an interrupted download
-// never leaves a corrupt file at the final path.
+// OriginalFilename can itself contain subfolders (e.g. some DICOM exports
+// use names like "DICOM/IM_0282"), in which case those intermediate
+// directories are created too. If a file with the same size and sha1
+// already exists at the final path, the download is skipped and
+// skipped=true is returned. The file is streamed into a temporary ".part"
+// file and atomically renamed on success, so an interrupted download never
+// leaves a corrupt file at the final path.
 //
 // onProgress, if non-nil, is called with the number of bytes written on every
 // underlying write, which callers can use to drive a progress indicator. It
 // is not called when the download is skipped.
 func (d *Datafile) Download(destDir string, onProgress func(n int64)) (path string, skipped bool, err error) {
-	if err = os.MkdirAll(destDir, 0o755); err != nil {
+	finalPath := filepath.Join(destDir, sanitizeFilePath(d.OriginalFilename))
+	if err = os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 		return "", false, err
 	}
-	finalPath := filepath.Join(destDir, d.OriginalFilename)
 
 	exists, err := d.matchesExisting(finalPath)
 	if err != nil {
@@ -77,6 +81,23 @@ func (d *Datafile) Download(destDir string, onProgress func(n int64)) (path stri
 		return "", false, err
 	}
 	return finalPath, false, nil
+}
+
+// sanitizeFilePath cleans a server-provided file path (OriginalFilename can
+// embed subfolders, e.g. "DICOM/IM_0001") for safe use as a local
+// filesystem path: it splits on "/" and "\" and drops any "", "." or ".."
+// segment, so the result can never escape the directory it's joined onto
+// (no path traversal via a crafted OriginalFilename).
+func sanitizeFilePath(p string) string {
+	parts := strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' })
+	kept := parts[:0]
+	for _, s := range parts {
+		if s == "" || s == "." || s == ".." {
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return filepath.Join(kept...)
 }
 
 // progressWriter forwards writes to w, reporting the number of bytes written
