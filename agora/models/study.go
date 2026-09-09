@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -10,18 +11,45 @@ import (
 const StudyURL = "api/v2/exam/"
 
 type Study struct {
-	ID          int       `json:"id"`
-	Name        string    `json:"name"`
-	Description *string   `json:"description"`
-	Project     *int      `json:"project"`
-	Patient     *Patient  `json:"patient"`
-	Uid         string    `json:"uid"`
-	ScannerName string    `json:"scanner_name"`
-	Vendor      int       `json:"vendor"`
-	StartTime   time.Time `json:"start_time"`
-	CreatedDate time.Time `json:"created_date"`
+	ID          int           `json:"id"`
+	Name        string        `json:"name"`
+	Description *string       `json:"description"`
+	Project     *int          `json:"project"`
+	Patient     *StudyPatient `json:"patient"`
+	Uid         string        `json:"uid"`
+	ScannerName string        `json:"scanner_name"`
+	Vendor      int           `json:"vendor"`
+	StartTime   time.Time     `json:"start_time"`
+	CreatedDate time.Time     `json:"created_date"`
 
 	http.BaseModel
+}
+
+// StudyPatient represents Study's "patient" field, which the API returns
+// as a full embedded Patient object on some endpoints (e.g.
+// GET api/v2/exam/{id}/) and as just the patient's numeric id on others
+// (e.g. an exam summary embedded in a folder's items listing). Patient is
+// nil when only an id was available.
+type StudyPatient struct {
+	ID      int
+	Patient *Patient
+}
+
+func (p *StudyPatient) UnmarshalJSON(data []byte) error {
+	var id int
+	if err := json.Unmarshal(data, &id); err == nil {
+		p.ID = id
+		p.Patient = nil
+		return nil
+	}
+
+	var patient Patient
+	if err := json.Unmarshal(data, &patient); err != nil {
+		return err
+	}
+	p.ID = patient.ID
+	p.Patient = &patient
+	return nil
 }
 
 // GetSeries returns the series belonging to this exam.
