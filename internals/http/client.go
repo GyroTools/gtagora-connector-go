@@ -108,6 +108,22 @@ func (client *Client) PostAndParse(path string, body io.Reader, target interface
 	return client.parseResponse(resp, target, path)
 }
 
+// Download performs a GET request against path and streams the response body
+// into w. Unlike GetAndParse, the response is not buffered into memory or
+// JSON-decoded, so it is suitable for large file downloads.
+func (client *Client) Download(path string, w io.Writer, timeout time.Duration) error {
+	resp, err := client.Get(path, timeout)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("status code = %d", resp.StatusCode)
+	}
+	_, err = io.Copy(w, resp.Body)
+	return err
+}
+
 func (client *Client) IsTimeoutError(err error) bool {
 	if err, ok := err.(net.Error); ok && err.Timeout() {
 		return true

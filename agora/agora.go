@@ -65,6 +65,26 @@ func (a *Agora) GetStudy(id int) (*models.Study, error) {
 	return &study, nil
 }
 
+func (a *Agora) GetSeries(id int) (*models.Series, error) {
+	var series models.Series
+
+	err := a.Client.GetAndParse(fmt.Sprintf("%s%d/", models.SeriesURL, id), &series)
+	if err != nil {
+		return nil, err
+	}
+	return &series, nil
+}
+
+func (a *Agora) GetDataset(id int) (*models.Dataset, error) {
+	var dataset models.Dataset
+
+	err := a.Client.GetAndParse(fmt.Sprintf("%s%d/", models.DatasetURL, id), &dataset)
+	if err != nil {
+		return nil, err
+	}
+	return &dataset, nil
+}
+
 func (a *Agora) GetPatient(id int) (*models.Patient, error) {
 	var patient models.Patient
 

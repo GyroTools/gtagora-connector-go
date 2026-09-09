@@ -93,7 +93,11 @@ type ImportProgress struct {
 	Progress int         `json:"progress"`
 }
 
-type Datafile struct {
+// UploadedDatafile is a single entry in an ImportResult's Datafiles list,
+// describing the outcome of importing one uploaded file. It is distinct from
+// the Datafile type in datafile.go, which represents the REST API's datafile
+// resource used for downloading.
+type UploadedDatafile struct {
 	Id      int    `json:"state"`
 	Path    string `json:"path"`
 	Sha1    string `json:"sha1"`
@@ -102,7 +106,7 @@ type Datafile struct {
 }
 
 type ImportResult struct {
-	Datafiles      []Datafile `json:"datafiles"`
+	Datafiles      []UploadedDatafile `json:"datafiles"`
 	NrFiles        int
 	NrUploaded     int
 	NrUploadFailed int
@@ -510,7 +514,7 @@ func (importPackage *ImportPackage) Result(progressChan chan UploadProgress) (*I
 			progressChan <- UploadProgress{Type: TypeResultProgress, Data: resultProgress}
 		}
 		// Create a map from result.Datafiles for quick lookups
-		datafileMap := make(map[string]Datafile)
+		datafileMap := make(map[string]UploadedDatafile)
 		for _, datafile := range result.Datafiles {
 			datafileMap[filepath.Clean(datafile.Path)] = datafile
 		}

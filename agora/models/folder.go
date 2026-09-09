@@ -10,9 +10,12 @@ import (
 const FolderURL = "api/v2/folder/"
 const FolderItemURL = "api/v2/folderitem/"
 const (
-	ContentTypeFolder  = "folder"
-	ContentTypeExam    = "exam"
-	ContentTypeSeries  = "series"
+	ContentTypeFolder = "folder"
+	ContentTypeExam   = "exam"
+	// ContentTypeSeries is "serie" (not "series") because content_type is the
+	// Django model name, and the model backing the series API resource is
+	// named "Serie".
+	ContentTypeSeries  = "serie"
 	ContentTypeDataset = "dataset"
 )
 
@@ -78,4 +81,82 @@ func (folder *Folder) GetFolders() ([]Folder, error) {
 		}
 	}
 	return folders, nil
+}
+
+// decodeContentObject decodes a FolderItem's polymorphic ContentObject into
+// the concrete type T (Study, Series or Dataset).
+func decodeContentObject[T any](item FolderItem) (T, error) {
+	var out T
+	contentBytes, err := json.Marshal(item.ContentObject)
+	if err != nil {
+		return out, err
+	}
+	err = json.Unmarshal(contentBytes, &out)
+	return out, err
+}
+
+// GetExams returns the exams that are direct items of this folder.
+func (folder *Folder) GetExams() ([]Study, error) {
+	items, err := folder.GetItems()
+	if err != nil {
+		return nil, err
+	}
+	var exams []Study
+	for _, item := range items {
+		if item.ContentType != ContentTypeExam {
+			continue
+		}
+		exam, err := decodeContentObject[Study](item)
+		if err != nil {
+			return nil, err
+		}
+		exam.URL = item.URL
+		exam.Client = item.Client
+		exams = append(exams, exam)
+	}
+	return exams, nil
+}
+
+// GetSeries returns the series that are direct items of this folder.
+func (folder *Folder) GetSeries() ([]Series, error) {
+	items, err := folder.GetItems()
+	if err != nil {
+		return nil, err
+	}
+	var series []Series
+	for _, item := range items {
+		if item.ContentType != ContentTypeSeries {
+			continue
+		}
+		s, err := decodeContentObject[Series](item)
+		if err != nil {
+			return nil, err
+		}
+		s.URL = item.URL
+		s.Client = item.Client
+		series = append(series, s)
+	}
+	return series, nil
+}
+
+// GetDatasets returns the datasets that are direct items of this folder.
+func (folder *Folder) GetDatasets() ([]Dataset, error) {
+	items, err := folder.GetItems()
+	if err != nil {
+		return nil, err
+	}
+	var datasets []Dataset
+	for _, item := range items {
+		if item.ContentType != ContentTypeDataset {
+			continue
+		}
+		ds, err := decodeContentObject[Dataset](item)
+		if err != nil {
+			return nil, err
+		}
+		ds.URL = item.URL
+		ds.Client = item.Client
+		datasets = append(datasets, ds)
+	}
+	return datasets, nil
 }
